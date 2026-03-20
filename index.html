@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#0a0f14"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="D Lingo"/>
+<title>D Lingo – Live Call Translator</title>
+<script>
+(function(){
+  var cdns=[
+    'https://unpkg.com/agora-rtc-sdk-ng@4.20.2/AgoraRTC_N-production.min.js',
+    'https://cdn.jsdelivr.net/npm/agora-rtc-sdk-ng@4.20.2/AgoraRTC_N-production.min.js',
+    'https://download.agora.io/sdk/release/AgoraRTC_N-4.20.2.js'
+  ];
+  var i=0;
+  function load(){
+    if(i>=cdns.length){var e=document.getElementById('agoraStatus');if(e)e.textContent='⚠️ Network error';return;}
+    var s=document.createElement('script');s.src=cdns[i];
+    s.onload=function(){var e=document.getElementById('agoraStatus');if(e)e.textContent='✅ Ready';window._agoraLoaded=true;};
+    s.onerror=function(){i++;load();};
+    document.head.appendChild(s);
+  }
+  load();
+})();
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#0a0f14;font-family:Outfit,sans-serif;color:#e8f4f0;overflow:hidden}
+#root{max-width:430px;margin:0 auto;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font-family:inherit;cursor:pointer;border:none;outline:none;touch-action:manipulation}
+input,select{font-family:inherit;outline:none}
+::-webkit-scrollbar{width:0}
+.scr{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0}
+.scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes glow{0%,100%{box-shadow:0 0 8px #00e5a044}50%{box-shadow:0 0 28px #00e5a099}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes ripple{0%{transform:scale(1);opacity:.8}100%{transform:scale(2.5);opacity:0}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ─── CONFIG ──────────────────────────────────────────────────
+var APP_ID = 'b3ad9d7f263945d6949e6bc6ee6e0e37';
+var TOKEN  = null;
+
+// ─── LANGUAGES ───────────────────────────────────────────────
+var LANGS = [
+  {name:'Telugu',     flag:'🇮🇳', code:'te-IN', gc:'te'},
+  {name:'English',    flag:'🇺🇸', code:'en-US', gc:'en'},
+  {name:'Hindi',      flag:'🇮🇳', code:'hi-IN', gc:'hi'},
+  {name:'Tamil',      flag:'🇮🇳', code:'ta-IN', gc:'ta'},
+  {name:'Spanish',    flag:'🇪🇸', code:'es-ES', gc:'es'},
+  {name:'French',     flag:'🇫🇷', code:'fr-FR', gc:'fr'},
+  {name:'German',     flag:'🇩🇪', code:'de-DE', gc:'de'},
+  {name:'Japanese',   flag:'🇯🇵', code:'ja-JP', gc:'ja'},
+  {name:'Chinese',    flag:'🇨🇳', code:'zh-CN', gc:'zh'},
+  {name:'Arabic',     flag:'🇸🇦', code:'ar-SA', gc:'ar'},
+  {name:'Korean',     flag:'🇰🇷', code:'ko-KR', gc:'ko'},
+  {name:'Portuguese', flag:'🇧🇷', code:'pt-BR', gc:'pt'},
+];
+
+// ─── STATE ───────────────────────────────────────────────────
+var S = {
+  screen:'home', client:null, localTrack:null,
+  remoteUsers:{}, channel:'', myCode:'', joinCode:'',
+  callSecs:0, callTmr:null, muted:false,
+  myLang:LANGS[0], theirLang:LANGS[1],
+  subtitles:[], recog:null, inCall:false,
+  remoteCount:0, streamId:null,
+  ttsUnlocked:false,
+  // buffer: collect interim words, translate after pause
+  bufTimer:null, bufText:'',
+};
+
+// ─── TTS — unlock on user gesture, then speak ────────────────
+// FIX: Mobile browsers block TTS until a user gesture happens.
+// We unlock on first call button press.
+function unlockTTS() {
+  if (S.ttsUnlocked || !window.speechSynthesis) return;
+  try { var u = new SpeechSynthesisUtterance(''); window.speechSynthesis.speak(u); } catch(e) {}
+  S.ttsUnlocked = true;
+}
+
+function speakNow(text, langCode) {
+  if (!text || text.length < 2 || !window.speechSynthesis) return;
+  try {
+    window.speechSynthesis.cancel();
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = langCode; u.rate = 0.9; u.pitch = 1; u.volume = 1;
+    var voices = window.speechSynthesis.getVoices();
+    var match = voices.find(function(v){ return v.lang.startsWith(langCode.split('-')[0]); });
+    if (match) u.voice = match;
+    window.speechSynthesis.speak(u);
+  } catch(e) { console.log('TTS error:', e); }
+}
+
+// ─── AGORA INIT ──────────────────────────────────────────────
+async function initAgora() {
+  S.client = AgoraRTC.createClient({mode:'rtc', codec:'vp8'});
+
+  S.client.on('user-published', async function(user, mediaType) {
+    await S.client.subscribe(user, mediaType);
+    if (mediaType === 'audio') {
+      user.audioTrack.play();
+      S.remoteCount++;
+      S.remoteUsers[user.uid] = user;
+      updateStatus('✅ Connected!');
+      if (S.screen === 'calling' || S.screen === 'waiting') {
+        S.screen='incall'; S.inCall=true;
+        startTimer(); startRecognition(); R();
+      }
+    }
+  });
+
+  S.client.on('user-unpublished', function(user, mediaType) {
+    if (mediaType==='audio') {
+      delete S.remoteUsers[user.uid];
+      S.remoteCount = Math.max(0, S.remoteCount-1);
+    }
+  });
+
+  S.client.on('user-left', function(user) {
+    delete S.remoteUsers[user.uid];
+    S.remoteCount = Math.max(0, S.remoteCount-1);
+    if (S.remoteCount<=0 && S.inCall) {
+      endCall();
+      setTimeout(function(){ alert('Other person ended the call.'); }, 300);
+    }
+  });
+
+  // ── RECEIVE from other person ─────────────────────────────
+  // msg.xlat = text already translated into MY language
+  // So I display it + speak it in MY language
+  S.client.on('stream-message', function(uid, data) {
+    try {
+      var msg = JSON.parse(new TextDecoder().decode(data));
+      if (msg.type === 'xlat') {
+        // msg.xlat is translated into receiver's language (MY language)
+        var id = 'r'+Date.now();
+        S.subtitles.push({id:id, who:'them', orig:msg.orig, xlat:msg.xlat});
+        if (S.subtitles.length>40) S.subtitles=S.subtitles.slice(-40);
+        updateSubs();
+        // FIX: Speak in MY language (the receiver's language)
+        speakNow(msg.xlat, S.myLang.code);
+      }
+    } catch(e) { console.log('stream-msg err:', e); }
+  });
+}
+
+// ─── JOIN CHANNEL ────────────────────────────────────────────
+async function joinChannel(name) {
+  try {
+    S.channel = name;
+    var uid = Math.floor(Math.random()*900000)+100000;
+    await S.client.join(APP_ID, name, TOKEN, uid);
+    S.localTrack = await AgoraRTC.createMicrophoneAudioTrack({
+      encoderConfig:'music_standard', AEC:true, ANS:true, AGC:true
+    });
+    await S.client.publish([S.localTrack]);
+    try {
+      S.streamId = await S.client.createDataStream({reliable:true, ordered:true});
+    } catch(e) { S.streamId=null; console.log('DataStream err:', e); }
+    return true;
+  } catch(e) {
+    alert('Connection failed: '+(e.message||e)+'\n\nMic permission allow cheyyi.');
+    return false;
+  }
+}
+
+// ─── CALL FUNCTIONS ──────────────────────────────────────────
+async function startCall() {
+  unlockTTS();
+  var code=(S.joinCode||'').trim().toUpperCase();
+  if (!code) { alert('Room Code enter cheyyi!'); return; }
+  if (code===S.myCode) { alert('Mee own code! Other person code enter cheyyi.'); return; }
+  S.screen='calling'; R();
+  var ok = await joinChannel(code);
+  if (!ok) { S.screen='home'; R(); }
+}
+
+async function createRoom() {
+  unlockTTS();
+  S.screen='waiting'; R();
+  var ok = await joinChannel(S.myCode);
+  if (!ok) { S.screen='home'; R(); }
+}
+
+async function endCall() {
+  if (S.callTmr) { clearInterval(S.callTmr); S.callTmr=null; }
+  if (S.bufTimer) { clearTimeout(S.bufTimer); S.bufTimer=null; }
+  if (S.recog) { try{S.recog.stop();}catch(e){} S.recog=null; }
+  if (S.localTrack) { try{S.localTrack.stop();S.localTrack.close();}catch(e){} S.localTrack=null; }
+  window.speechSynthesis.cancel();
+  try { if(S.client) await S.client.leave(); } catch(e) {}
+  S.inCall=false; S.remoteUsers={}; S.remoteCount=0;
+  S.subtitles=[]; S.callSecs=0; S.streamId=null;
+  S.muted=false; S.bufText=''; S.screen='home';
+  R();
+}
+
+// ─── TIMER ───────────────────────────────────────────────────
+function startTimer() {
+  S.callSecs=0;
+  if (S.callTmr) clearInterval(S.callTmr);
+  S.callTmr = setInterval(function(){
+    S.callSecs++;
+    var el=document.getElementById('callTimer');
+    if (el) el.textContent=fmt(S.callSecs);
+  }, 1000);
+}
+function fmt(s){ return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
+
+// ─── SPEECH RECOGNITION ──────────────────────────────────────
+function startRecognition() {
+  if (S.recog) { try{S.recog.stop();}catch(e){} S.recog=null; }
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    pushSub('system','⚠️ Browser mic SR not supported. Type below to translate.','');
+    return;
+  }
+
+  var r = new SR();
+  r.lang = S.myLang.code;
+  r.interimResults = true;
+  r.continuous = true;
+  r.maxAlternatives = 1;
+
+  var intId = null;
+  var lastSent = '';
+
+  r.onresult = function(e) {
+    var fin='', intr='';
+    for (var i=e.resultIndex; i<e.results.length; i++) {
+      if (e.results[i].isFinal) fin += e.results[i][0].transcript;
+      else intr += e.results[i][0].transcript;
+    }
+
+    // Show interim (live preview of what you're saying)
+    if (intr) {
+      if (!intId) {
+        intId='i'+Date.now();
+        S.subtitles.push({id:intId, who:'me', orig:intr, xlat:'', interim:true});
+      } else {
+        var ix=S.subtitles.findIndex(function(x){return x.id===intId;});
+        if (ix>=0) S.subtitles[ix].orig=intr;
+      }
+      updateSubs();
+    }
+
+    // Final — translate full sentence
+    if (fin) {
+      if (intId) {
+        S.subtitles=S.subtitles.filter(function(x){return x.id!==intId;});
+        intId=null;
+      }
+      fin=fin.trim();
+      if (!fin) return;
+
+      // FIX: Accumulate text, translate full sentence after short pause
+      // This prevents word-by-word partial translations
+      S.bufText = (S.bufText ? S.bufText+' ' : '') + fin;
+      if (S.bufTimer) clearTimeout(S.bufTimer);
+
+      // Show accumulated text immediately as subtitle
+      var curBuf = S.bufText;
+      var id='f'+Date.now();
+      // Update or add subtitle for current buffer
+      var lastMe = null;
+      for (var j=S.subtitles.length-1; j>=0; j--) {
+        if (S.subtitles[j].who==='me' && !S.subtitles[j].interim) { lastMe=j; break; }
+      }
+      if (lastMe!==null && S.subtitles[lastMe].xlat==='Translating…') {
+        // Update existing pending subtitle
+        S.subtitles[lastMe].orig = curBuf;
+        id = S.subtitles[lastMe].id;
+      } else {
+        S.subtitles.push({id:id, who:'me', orig:curBuf, xlat:'⏳ Translating...'});
+        if (S.subtitles.length>40) S.subtitles=S.subtitles.slice(-40);
+      }
+      updateSubs();
+
+      // Translate after 800ms pause (full sentence ready)
+      S.bufTimer = setTimeout(function(){
+        var textToSend = S.bufText;
+        S.bufText = '';
+        if (!textToSend || textToSend===lastSent) return;
+        lastSent = textToSend;
+
+        doTranslate(textToSend, S.myLang.gc, S.theirLang.gc, function(xlat) {
+          // Update subtitle with translation
+          var idx=S.subtitles.findIndex(function(x){return x.id===id;});
+          if (idx>=0) {
+            S.subtitles[idx].orig = textToSend;
+            S.subtitles[idx].xlat = xlat;
+          }
+          updateSubs();
+          // Send to other person — they will hear it in THEIR language
+          sendStream(textToSend, xlat);
+        });
+      }, 1200); // 1.2s pause = full sentence
+    }
+  };
+
+  r.onerror = function(e) {
+    console.log('SR error:', e.error);
+    if (e.error==='not-allowed') pushSub('system','⚠️ Mic blocked. Type below.','');
+  };
+
+  // Auto-restart (Android stops SR after silence)
+  r.onend = function() {
+    if (S.inCall && !S.muted && S.recog===r) {
+      setTimeout(function(){ try{r.start();}catch(e){} }, 300);
+    }
+  };
+
+  S.recog=r;
+  try { r.start(); } catch(e) { console.log('SR start err:', e); }
+}
+
+// ─── SEND STREAM TO OTHER PERSON ─────────────────────────────
+function sendStream(origText, xlatText) {
+  if (S.streamId===null) return;
+  if (!xlatText || xlatText.indexOf('failed')>=0 || xlatText.indexOf('error')>=0) return;
+  try {
+    var p = JSON.stringify({type:'xlat', orig:origText, xlat:xlatText});
+    var bytes = new TextEncoder().encode(p);
+    if (bytes.length > 1024) return; // Agora stream message limit
+    S.client.sendStreamMessage(S.streamId, bytes);
+  } catch(e) { console.log('sendStream err:', e); }
+}
+
+// ─── TRANSLATE — Multi-engine, high accuracy ─────────────────
+async function doTranslate(text, fromGc, toGc, cb) {
+  if (!text || !text.trim()) { cb(''); return; }
+  text = text.trim();
+  if (fromGc===toGc) { cb(text); return; }
+
+  // Engine 1: Google Translate (client=gtx — most accurate, free)
+  var result = await tryGoogle(text, fromGc, toGc);
+  if (result) { cb(result); return; }
+
+  // Engine 2: Google Translate alternative URL
+  var result2 = await tryGoogle2(text, fromGc, toGc);
+  if (result2) { cb(result2); return; }
+
+  // Engine 3: MyMemory fallback
+  var result3 = await tryMyMemory(text, fromGc, toGc);
+  if (result3) { cb(result3); return; }
+
+  cb('(translate failed — check internet)');
+}
+
+async function tryGoogle(text, from, to) {
+  try {
+    var url = 'https://translate.googleapis.com/translate_a/single' +
+      '?client=gtx&sl='+from+'&tl='+to+'&dt=t&ie=UTF-8&oe=UTF-8' +
+      '&q='+encodeURIComponent(text);
+    var res = await fetch(url);
+    if (!res.ok) return null;
+    var d = await res.json();
+    if (d && d[0] && Array.isArray(d[0])) {
+      var out = d[0].reduce(function(a,c){ return a+(c&&c[0]?c[0]:''); },'').trim();
+      if (out && out.length > 0) return out;
+    }
+  } catch(e) {}
+  return null;
+}
+
+async function tryGoogle2(text, from, to) {
+  try {
+    // Alternative Google endpoint
+    var url = 'https://clients5.google.com/translate_a/t' +
+      '?client=dict-chrome-ex&sl='+from+'&tl='+to+'&q='+encodeURIComponent(text);
+    var res = await fetch(url);
+    if (!res.ok) return null;
+    var d = await res.json();
+    // This returns different format: [["translation"]] or {sentences:[{trans:...}]}
+    if (Array.isArray(d) && d[0] && Array.isArray(d[0])) {
+      var out = d[0][0];
+      if (out && typeof out === 'string' && out.trim()) return out.trim();
+    }
+    if (d && d.sentences) {
+      var out2 = d.sentences.map(function(s){ return s.trans||''; }).join('').trim();
+      if (out2) return out2;
+    }
+  } catch(e) {}
+  return null;
+}
+
+async function tryMyMemory(text, from, to) {
+  try {
+    var url = 'https://api.mymemory.translated.net/get?q='+
+      encodeURIComponent(text)+'&langpair='+from+'|'+to+'&de=dlingo@app.com';
+    var res = await fetch(url);
+    var d = await res.json();
+    if (d.responseStatus===200 && d.responseData && d.responseData.translatedText) {
+      var r = d.responseData.translatedText.trim();
+      if (r && r.indexOf('MYMEMORY WARNING')<0 && r.length>0) return r;
+    }
+  } catch(e) {}
+  return null;
+}
+
+// ─── SUBTITLE HELPERS ────────────────────────────────────────
+function pushSub(who, orig, xlat) {
+  S.subtitles.push({id:'s'+Date.now(), who:who, orig:orig, xlat:xlat});
+  if (S.subtitles.length>40) S.subtitles=S.subtitles.slice(-40);
+  updateSubs();
+}
+function updateSubs() {
+  var el=document.getElementById('subsBox');
+  if (!el) return;
+  el.innerHTML=subsHTML();
+  el.scrollTop=el.scrollHeight;
+}
+function subsHTML() {
+  if (!S.subtitles.length)
+    return '<div style="text-align:center;color:#2a3a4a;font-size:13px;padding:40px 16px">🎙 Speak naturally — translation appears here</div>';
+  return S.subtitles.map(function(s){
+    var me=s.who==='me';
+    if (s.who==='system')
+      return '<div style="text-align:center;font-size:11px;color:#5a7a8a;padding:6px 0">'+esc(s.orig)+'</div>';
+    return(
+      '<div style="display:flex;flex-direction:column;align-items:'+(me?'flex-end':'flex-start')+';margin-bottom:10px;animation:fadeUp .2s ease">'+
+      '<div style="font-size:9px;color:#5a7a8a;margin-bottom:3px">'+(me?'You '+S.myLang.flag:'Them '+S.theirLang.flag)+'</div>'+
+      '<div style="background:'+(me?'#1a2a4a':'#1a2330')+';border:1px solid '+(me?'#2a4a8a':'#1e2d3d')+
+        ';border-radius:'+(me?'12px 12px 3px 12px':'12px 12px 12px 3px')+
+        ';padding:8px 12px;max-width:90%;'+(s.interim?'opacity:.5':'')+'">'  +
+      '<div style="font-size:13px;color:#e8f4f0;line-height:1.5">'+esc(s.orig)+'</div></div>'+
+      (s.xlat&&!s.interim?
+        '<div style="background:'+(me?'#0a2a1e':'#0a1e18')+';border:1px solid #1a5a40;'+
+          'border-radius:'+(me?'3px 12px 12px 12px':'12px 3px 12px 12px')+
+          ';padding:6px 12px;max-width:90%;margin-top:2px">'+
+        '<div style="font-size:12px;color:#00e5a0;line-height:1.5">'+esc(s.xlat)+'</div></div>':'')+
+      '</div>'
+    );
+  }).join('');
+}
+function esc(t){ return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ─── CONTROLS ────────────────────────────────────────────────
+function toggleMute() {
+  S.muted=!S.muted;
+  if (S.localTrack) S.localTrack.setEnabled(!S.muted);
+  if (S.muted && S.recog) { try{S.recog.stop();}catch(e){} }
+  else if (!S.muted) startRecognition();
+  R();
+}
+
+// Type & send (manual fallback)
+function sendTyped() {
+  var el=document.getElementById('typeInput');
+  if (!el) return;
+  var text=el.value.trim();
+  if (!text) return;
+  el.value=''; el.focus();
+  var id='f'+Date.now();
+  S.subtitles.push({id:id, who:'me', orig:text, xlat:'⏳ Translating...'});
+  if (S.subtitles.length>40) S.subtitles=S.subtitles.slice(-40);
+  updateSubs();
+  doTranslate(text, S.myLang.gc, S.theirLang.gc, function(xlat){
+    var idx=S.subtitles.findIndex(function(x){return x.id===id;});
+    if (idx>=0) S.subtitles[idx].xlat=xlat;
+    updateSubs();
+    sendStream(text, xlat);
+  });
+}
+
+// ─── UTILS ───────────────────────────────────────────────────
+function copyCode(){
+  navigator.clipboard ? navigator.clipboard.writeText(S.myCode).then(function(){
+    alert('Copied!\n\n'+S.myCode+'\n\nShare via WhatsApp!');
+  }) : alert('Room Code:\n\n'+S.myCode);
+}
+function shareCode(){
+  var url=window.location.href.split('?')[0];
+  var msg='🌐 D Lingo Call Invite!\n\nRoom Code: '+S.myCode+'\n\nOpen: '+url+'\nEnter code → Call & Translate!';
+  navigator.share ? navigator.share({title:'D Lingo',text:msg}).catch(function(){}) : copyCode();
+}
+function updateStatus(msg){ var el=document.getElementById('connStatus'); if(el) el.textContent=msg; }
+function genCode(){ var c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789',s=''; for(var i=0;i<8;i++) s+=c[Math.floor(Math.random()*c.length)]; return s; }
+function bindScreen(){
+  setTimeout(function(){
+    var ml=document.getElementById('myLang'); var tl=document.getElementById('theirLang');
+    if(ml){var mi=LANGS.findIndex(function(l){return l.code===S.myLang.code;});if(mi>=0)ml.selectedIndex=mi;}
+    if(tl){var ti=LANGS.findIndex(function(l){return l.code===S.theirLang.code;});if(ti>=0)tl.selectedIndex=ti;}
+  },50);
+}
+
+// ─── RENDER ──────────────────────────────────────────────────
+function R(){
+  var root=document.getElementById('root');
+  if(S.screen==='home')        root.innerHTML=homeHTML();
+  else if(S.screen==='calling') root.innerHTML=callingHTML();
+  else if(S.screen==='waiting') root.innerHTML=waitingHTML();
+  else if(S.screen==='incall')  root.innerHTML=incallHTML();
+  bindScreen();
+}
+
+// ─── HOME ────────────────────────────────────────────────────
+function homeHTML(){
+  var myI=LANGS.findIndex(function(l){return l.code===S.myLang.code;});
+  var thI=LANGS.findIndex(function(l){return l.code===S.theirLang.code;});
+  var opts=LANGS.map(function(l,i){return '<option value="'+i+'"'+(i===myI?' selected':'')+'>'+l.flag+' '+l.name+'</option>';}).join('');
+  var opts2=LANGS.map(function(l,i){return '<option value="'+i+'"'+(i===thI?' selected':'')+'>'+l.flag+' '+l.name+'</option>';}).join('');
+  return(
+    '<div class="scr" style="background:linear-gradient(160deg,#0a0f14 60%,#0a1a2a)">'+
+    '<div style="padding:14px 18px 10px;flex-shrink:0">'+
+    '<div style="font-size:24px;font-weight:700;color:#00e5a0">🌐 D Lingo</div>'+
+    '<div style="font-size:10px;color:#5a7a8a">AI Real-Time Call Translator</div>'+
+    '<div id="agoraStatus" style="font-size:9px;color:#3a5a4a">Loading SDK…</div>'+
+    '</div>'+
+    '<div class="scroll" style="padding:0 16px 24px">'+
+
+    // Free badge
+    '<div style="background:#0a2010;border:1px solid #1a5a30;border-radius:10px;padding:8px 14px;margin-bottom:12px;display:flex;align-items:center;gap:8px">'+
+    '<div style="font-size:15px">✅</div>'+
+    '<div><div style="font-size:11px;color:#00e5a0;font-weight:600">Free Translation — Google Translate</div>'+
+    '<div style="font-size:9px;color:#3a7a5a">No API key needed • Auto voice output</div></div>'+
+    '</div>'+
+
+    // Step 1 — Room Code
+    '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:12px">'+
+    '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:10px">📱 STEP 1 — YOUR ROOM CODE</div>'+
+    '<div style="display:flex;align-items:center;gap:8px">'+
+    '<div style="font-size:20px;font-weight:700;color:#00e5a0;letter-spacing:3px;background:#0a0f14;border:1px solid #1a5a40;border-radius:10px;padding:10px 14px;flex:1;text-align:center">'+S.myCode+'</div>'+
+    '<button onclick="copyCode()" style="width:44px;height:44px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:20px;display:flex;align-items:center;justify-content:center">📋</button>'+
+    '<button onclick="shareCode()" style="width:44px;height:44px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:20px;display:flex;align-items:center;justify-content:center">📤</button>'+
+    '</div>'+
+    '<button onclick="createRoom()" style="width:100%;margin-top:10px;padding:13px;border-radius:12px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:center;gap:8px">'+
+    '📞 Wait for Call (Open My Room)</button>'+
+    '</div>'+
+
+    // Step 2 — Call
+    '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:12px">'+
+    '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:10px">📞 STEP 2 — CALL SOMEONE</div>'+
+    '<input id="joinInput" type="text" value="'+S.joinCode+'" placeholder="Enter Room Code (e.g. ABCD1234)" '+
+    'oninput="S.joinCode=this.value.toUpperCase();this.value=this.value.toUpperCase()" '+
+    'style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:12px 14px;font-size:15px;letter-spacing:2px;text-align:center;margin-bottom:10px" '+
+    'autocomplete="off" autocorrect="off" spellcheck="false"/>'+
+    '<button onclick="startCall()" style="width:100%;padding:14px;border-radius:14px;background:linear-gradient(135deg,#00e5a0,#00c896);color:#0a0f14;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 20px #00e5a044;animation:glow 2s infinite">'+
+    '📞 Call & Translate</button>'+
+    '</div>'+
+
+    // Language Settings
+    '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:12px">'+
+    '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:12px">🌐 LANGUAGE SETTINGS</div>'+
+    '<div style="display:flex;align-items:center;gap:10px">'+
+    '<div style="flex:1"><div style="font-size:10px;color:#5a7a8a;margin-bottom:5px">I speak</div>'+
+    '<select id="myLang" onchange="S.myLang=LANGS[this.value];R()" style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:10px 12px;font-size:13px">'+opts+'</select></div>'+
+    '<div style="font-size:20px;color:#00e5a0;flex-shrink:0;margin-top:14px">⇄</div>'+
+    '<div style="flex:1"><div style="font-size:10px;color:#5a7a8a;margin-bottom:5px">They speak</div>'+
+    '<select id="theirLang" onchange="S.theirLang=LANGS[this.value];R()" style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:10px 12px;font-size:13px">'+opts2+'</select></div>'+
+    '</div></div>'+
+
+    // How to use
+    '<div style="background:#0a1520;border:1px solid #1e2d3d;border-radius:14px;padding:14px 16px">'+
+    '<div style="font-size:11px;font-weight:600;color:#e8f4f0;margin-bottom:10px">💡 How it works</div>'+
+    ['Person A: Copy Room Code → Share via WhatsApp',
+     'Person A: Tap "Wait for Call"',
+     'Person B: Enter code → Tap "Call & Translate"',
+     'Speak naturally — translation auto plays in other person\'s language! 🔊'
+    ].map(function(s,i){
+      return '<div style="display:flex;gap:10px;margin-bottom:8px">'+
+      '<div style="min-width:20px;height:20px;border-radius:50%;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center">'+(i+1)+'</div>'+
+      '<div style="font-size:12px;color:#5a7a8a;line-height:1.6">'+s+'</div></div>';
+    }).join('')+
+    '<div style="font-size:10px;color:#3a5a4a;margin-top:4px">⚠️ Not for emergency use.</div>'+
+    '</div>'+
+    '</div></div>'
+  );
+}
+
+// ─── CALLING ─────────────────────────────────────────────────
+function callingHTML(){
+  return(
+    '<div class="scr" style="background:#08111a;align-items:center;justify-content:center;padding:32px;gap:16px">'+
+    '<div style="font-size:52px">🌐</div>'+
+    '<div style="font-size:20px;font-weight:700">Connecting…</div>'+
+    '<div style="width:40px;height:40px;border:3px solid #1e2d3d;border-top:3px solid #00e5a0;border-radius:50%;animation:spin 1s linear infinite"></div>'+
+    '<div id="connStatus" style="font-size:13px;color:#00e5a0;text-align:center">Joining…</div>'+
+    '<div style="font-size:12px;color:#5a7a8a">Room: <b style="color:#e8f4f0">'+S.joinCode+'</b></div>'+
+    '<div style="font-size:11px;color:#3a5a4a;text-align:center">Other person join అవ్వాలి…</div>'+
+    '<button onclick="endCall()" style="margin-top:20px;width:64px;height:64px;border-radius:50%;background:#cc2222;font-size:26px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px #cc222255">📵</button>'+
+    '<div style="font-size:11px;color:#5a7a8a">Cancel</div>'+
+    '</div>'
+  );
+}
+
+// ─── WAITING ─────────────────────────────────────────────────
+function waitingHTML(){
+  return(
+    '<div class="scr" style="background:#08111a;align-items:center;justify-content:center;padding:32px;gap:16px">'+
+    '<div style="position:relative">'+
+    '<div style="width:88px;height:88px;border-radius:50%;background:#0d3325;border:3px solid #00e5a0;display:flex;align-items:center;justify-content:center;font-size:40px;animation:glow 2s infinite">📞</div>'+
+    '<div style="position:absolute;inset:-8px;border-radius:50%;border:2px solid #00e5a044;animation:ripple 1.5s ease infinite"></div>'+
+    '</div>'+
+    '<div style="font-size:20px;font-weight:700">Waiting for call…</div>'+
+    '<div style="font-size:24px;font-weight:700;color:#00e5a0;letter-spacing:3px;background:#0a0f14;border:1px solid #1a5a40;border-radius:12px;padding:12px 24px">'+S.myCode+'</div>'+
+    '<div style="display:flex;gap:12px">'+
+    '<button onclick="copyCode()" style="padding:10px 20px;border-radius:12px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:13px">📋 Copy</button>'+
+    '<button onclick="shareCode()" style="padding:10px 20px;border-radius:12px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:13px">📤 Share</button>'+
+    '</div>'+
+    '<button onclick="endCall()" style="padding:12px 32px;border-radius:12px;background:#2a0f0f;border:1px solid #4a1a1a;color:#ff5555;font-size:14px">Cancel</button>'+
+    '</div>'
+  );
+}
+
+// ─── IN CALL ─────────────────────────────────────────────────
+function incallHTML(){
+  var micOn=!S.muted;
+  return(
+    '<div class="scr" style="background:#08111a">'+
+
+    // Top bar
+    '<div style="background:#0d1820;padding:12px 16px 10px;flex-shrink:0">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+    '<div>'+
+    '<div style="font-size:15px;font-weight:700">Live Call</div>'+
+    '<div style="font-size:11px;color:#00e5a0;display:flex;align-items:center;gap:5px">'+
+    '<div style="width:7px;height:7px;border-radius:50%;background:#00e5a0;animation:pulse 1s infinite"></div>'+
+    (micOn ? 'Listening & Translating…' : '🔇 Muted')+
+    '</div></div>'+
+    '<div id="callTimer" style="font-size:24px;font-weight:700;font-variant-numeric:tabular-nums">'+fmt(S.callSecs)+'</div>'+
+    '</div>'+
+    // Lang bar
+    '<div style="background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;padding:8px 14px;display:flex;align-items:center;justify-content:space-between">'+
+    '<div style="display:flex;align-items:center;gap:6px">'+
+    '<span style="font-size:18px">'+S.myLang.flag+'</span>'+
+    '<span style="font-size:12px;color:#e8f4f0">'+S.myLang.name+'</span>'+
+    '</div>'+
+    '<div style="background:#00e5a0;color:#0a0f14;border-radius:20px;padding:3px 12px;font-size:10px;font-weight:700">🔄 LIVE</div>'+
+    '<div style="display:flex;align-items:center;gap:6px">'+
+    '<span style="font-size:12px;color:#e8f4f0">'+S.theirLang.name+'</span>'+
+    '<span style="font-size:18px">'+S.theirLang.flag+'</span>'+
+    '</div>'+
+    '</div></div>'+
+
+    // Subtitles
+    '<div id="subsBox" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:2px;-webkit-overflow-scrolling:touch">'+
+    subsHTML()+
+    '</div>'+
+
+    // Type fallback
+    '<div style="background:#0a1218;padding:8px 14px;flex-shrink:0;border-top:1px solid #1e2d3d">'+
+    '<div style="font-size:9px;color:#3a5a4a;margin-bottom:5px">⌨️ Mic work avvatle type cheyyi (Enter = Send)</div>'+
+    '<div style="display:flex;gap:8px">'+
+    '<input id="typeInput" type="text" placeholder="Type to translate & send…" '+
+    'onkeydown="if(event.key===\'Enter\')sendTyped()" '+
+    'style="flex:1;background:#111920;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:9px 12px;font-size:13px" '+
+    'autocomplete="off" autocorrect="off" spellcheck="false"/>'+
+    '<button onclick="sendTyped()" style="padding:9px 16px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:13px;font-weight:700">Send</button>'+
+    '</div></div>'+
+
+    // Controls
+    '<div style="background:#0d1820;padding:10px 14px 24px;flex-shrink:0">'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">'+
+    cbtn(micOn?'🎤':'🔇', micOn?'Mic ON':'Muted', micOn, 'toggleMute()')+
+    cbtn('🔊','Speaker',true,'void(0)')+
+    '</div>'+
+    '<button onclick="endCall()" style="width:100%;padding:16px;border-radius:14px;background:#cc2222;color:#fff;font-weight:700;font-size:17px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 16px #cc222255">'+
+    '📵 End Call</button>'+
+    '</div>'+
+    '</div>'
+  );
+}
+function cbtn(icon,label,on,fn){
+  return '<button onclick="'+fn+'" style="padding:11px 0;border-radius:12px;border:1px solid '+
+    (on?'#1a5a40':'#4a2020')+';background:'+(on?'#0d3325':'#2a1010')+
+    ';color:'+(on?'#00e5a0':'#ff6666')+
+    ';display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px">'+
+    '<span style="font-size:22px">'+icon+'</span>'+label+'</button>';
+}
+
+// ─── INIT ────────────────────────────────────────────────────
+S.myCode = genCode();
+var urlP=new URLSearchParams(window.location.search);
+var pre=urlP.get('code');
+if(pre) S.joinCode=pre.toUpperCase();
+R();
+
+// Preload TTS voices (Android needs this)
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = function(){
+    window.speechSynthesis.getVoices();
+  };
+  try { window.speechSynthesis.getVoices(); } catch(e) {}
+}
+
+var aw=setInterval(function(){
+  if(typeof AgoraRTC!=='undefined'){
+    clearInterval(aw);
+    initAgora().catch(function(e){
+      var el=document.getElementById('agoraStatus');
+      if(el)el.textContent='⚠️ Deploy to Netlify to use calls';
+    });
+  }
+},200);
+// After 15s show helpful message
+setTimeout(function(){
+  clearInterval(aw);
+  if(typeof AgoraRTC==='undefined'){
+    var el=document.getElementById('agoraStatus');
+    if(el)el.textContent='⚠️ Upload to Netlify — local file lo work cheyyadhu';
+  }
+},15000);
+
+// Catch all unhandled errors silently (Script error from CDN)
+window.addEventListener('error', function(e){
+  // Only show if it's our own code error, not cross-origin script errors
+  if(e.message && e.message!=='Script error.' && e.filename && e.filename.indexOf('agora')<0){
+    console.log('App error:', e.message);
+  }
+  return true; // prevent default browser error display
+});
+</script>
+</body>
+</html>
