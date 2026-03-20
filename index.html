@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#0a0f14"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="D Lingo"/>
+<title>D Lingo – Real Call Translator</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#0a0f14;font-family:Outfit,sans-serif;color:#e8f4f0;overflow:hidden}
+#root{max-width:430px;margin:0 auto;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font-family:inherit;cursor:pointer;border:none;outline:none;touch-action:manipulation}
+input,select,textarea{font-family:inherit;outline:none}
+::-webkit-scrollbar{width:0}
+.screen{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0}
+.scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes glow{0%,100%{box-shadow:0 0 8px #00e5a044}50%{box-shadow:0 0 28px #00e5a099}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+@keyframes ring{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+@keyframes ripple{0%{transform:scale(1);opacity:.8}100%{transform:scale(2.5);opacity:0}}
+</style>
+</head>
+<body>
+<div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#00e5a0;font-size:28px">🌐</div></div>
+<audio id="remoteAudio" autoplay playsinline></audio>
+
+<script>
+// ─── STATE ────────────────────────────────
+var S={
+  screen:'home', // home | calling | incall | settings
+  peer:null, conn:null, call:null,
+  myId:null, peerId:'',
+  localStream:null, remoteStream:null,
+  myLang:{name:'Telugu',flag:'🇮🇳',code:'te-IN',label:'TE'},
+  theirLang:{name:'English',flag:'🇺🇸',code:'en-US',label:'EN'},
+  callSecs:0, callTmr:null,
+  muted:false, speaker:true,
+  subtitles:[], // {id,who,orig,xlat}
+  recog:null, recognizing:false, translating:false,
+  status:'', // connecting|ringing|connected|ended
+  incomingCall:null,
+  settings:{autoTranslate:true,voiceOutput:true,subtitles:true}
+};
+
+var LANGS=[
+  {name:'Telugu',   flag:'🇮🇳',code:'te-IN',label:'TE'},
+  {name:'English',  flag:'🇺🇸',code:'en-US',label:'EN'},
+  {name:'Hindi',    flag:'🇮🇳',code:'hi-IN',label:'HI'},
+  {name:'Tamil',    flag:'🇮🇳',code:'ta-IN',label:'TA'},
+  {name:'Spanish',  flag:'🇪🇸',code:'es-ES',label:'ES'},
+  {name:'French',   flag:'🇫🇷',code:'fr-FR',label:'FR'},
+  {name:'German',   flag:'🇩🇪',code:'de-DE',label:'DE'},
+  {name:'Japanese', flag:'🇯🇵',code:'ja-JP',label:'JA'},
+  {name:'Chinese',  flag:'🇨🇳',code:'zh-CN',label:'ZH'},
+  {name:'Arabic',   flag:'🇸🇦',code:'ar-SA',label:'AR'},
+  {name:'Korean',   flag:'🇰🇷',code:'ko-KR',label:'KO'},
+  {name:'Portuguese',flag:'🇧🇷',code:'pt-BR',label:'PT'},
+];
+
+// ─── PEERJS INIT ──────────────────────────
+function initPeer(){
+  S.peer = new Peer(undefined, {
+    host: '0.peerjs.com', port: 443, secure: true,
+    config:{iceServers:[
+      {urls:'stun:stun.l.google.com:19302'},
+      {urls:'stun:stun1.l.google.com:19302'},
+    ]}
+  });
+  S.peer.on('open', function(id){
+    S.myId = id;
+    S.status='ready';
+    R();
+  });
+  S.peer.on('call', function(call){
+    S.incomingCall = call;
+    S.screen='incoming';
+    R();
+  });
+  S.peer.on('error', function(err){
+    S.status='error:'+err.type;
+    R();
+  });
+}
+
+// ─── CALL FUNCTIONS ───────────────────────
+function startCall(){
+  var pid = S.peerId.trim();
+  if(!pid){ alert('Enter a Room Code first!'); return; }
+  S.status='connecting';
+  S.screen='calling';
+  R();
+  navigator.mediaDevices.getUserMedia({audio:true, video:false})
+  .then(function(stream){
+    S.localStream=stream;
+    var call=S.peer.call(pid, stream);
+    S.call=call;
+    S.status='ringing';
+    R();
+    call.on('stream', function(remoteStream){
+      S.remoteStream=remoteStream;
+      document.getElementById('remoteAudio').srcObject=remoteStream;
+      S.screen='incall';
+      S.status='connected';
+      S.callSecs=0;
+      S.subtitles=[];
+      startTimer();
+      startRecognition();
+      R();
+    });
+    call.on('close', function(){ endCall(); });
+    call.on('error', function(){ endCall(); });
+  })
+  .catch(function(e){ alert('Mic permission required!\n\nSettings > Site Settings > Microphone > Allow'); S.screen='home'; R(); });
+}
+
+function answerCall(){
+  navigator.mediaDevices.getUserMedia({audio:true, video:false})
+  .then(function(stream){
+    S.localStream=stream;
+    S.incomingCall.answer(stream);
+    S.call=S.incomingCall;
+    S.incomingCall=null;
+    S.call.on('stream', function(remoteStream){
+      S.remoteStream=remoteStream;
+      document.getElementById('remoteAudio').srcObject=remoteStream;
+      S.screen='incall';
+      S.status='connected';
+      S.callSecs=0;
+      S.subtitles=[];
+      startTimer();
+      startRecognition();
+      R();
+    });
+    S.call.on('close', function(){ endCall(); });
+    S.screen='calling';
+    R();
+  })
+  .catch(function(){ alert('Mic permission required!'); S.screen='home'; R(); });
+}
+
+function declineCall(){
+  if(S.incomingCall) S.incomingCall.close();
+  S.incomingCall=null;
+  S.screen='home';
+  R();
+}
+
+function endCall(){
+  if(S.callTmr) clearInterval(S.callTmr);
+  if(S.recog){ try{S.recog.stop();}catch(e){} }
+  if(S.call){ try{S.call.close();}catch(e){} }
+  if(S.localStream) S.localStream.getTracks().forEach(function(t){t.stop();});
+  window.speechSynthesis.cancel();
+  S.call=null; S.localStream=null; S.remoteStream=null;
+  S.screen='home'; S.status='ended'; S.recognizing=false; S.translating=false;
+  R();
+}
+
+function startTimer(){
+  if(S.callTmr) clearInterval(S.callTmr);
+  S.callTmr=setInterval(function(){
+    S.callSecs++;
+    var el=document.getElementById('callTimer');
+    if(el) el.textContent=fmtTime(S.callSecs);
+  },1000);
+}
+
+function fmtTime(s){
+  return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+}
+
+// ─── SPEECH RECOGNITION ───────────────────
+function startRecognition(){
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ console.log('No SR'); return; }
+  var r=new SR();
+  r.lang=S.myLang.code;
+  r.interimResults=true;
+  r.continuous=true;
+  r.maxAlternatives=1;
+  var interimId=null;
+
+  r.onresult=function(e){
+    var final='',interim='';
+    for(var i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal) final+=e.results[i][0].transcript;
+      else interim+=e.results[i][0].transcript;
+    }
+    if(interim){
+      if(!interimId){ interimId='i'+Date.now(); S.subtitles.push({id:interimId,who:'me',orig:interim,xlat:'…',interim:true}); }
+      else{ var idx=S.subtitles.findIndex(function(x){return x.id===interimId;}); if(idx>=0) S.subtitles[idx].orig=interim; }
+      updateSubtitles();
+    }
+    if(final){
+      // remove interim
+      if(interimId){ S.subtitles=S.subtitles.filter(function(x){return x.id!==interimId;}); interimId=null; }
+      var id='f'+Date.now();
+      S.subtitles.push({id:id,who:'me',orig:final,xlat:'Translating…'});
+      if(S.subtitles.length>20) S.subtitles=S.subtitles.slice(-20);
+      updateSubtitles();
+      // translate
+      translateText(final, S.theirLang.name, function(xlat){
+        var idx=S.subtitles.findIndex(function(x){return x.id===id;});
+        if(idx>=0) S.subtitles[idx].xlat=xlat;
+        updateSubtitles();
+        if(S.settings.voiceOutput && xlat && xlat!=='…'){
+          var u=new SpeechSynthesisUtterance(xlat);
+          u.lang=S.theirLang.code;
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+        }
+      });
+    }
+  };
+  r.onerror=function(e){ if(e.error!=='no-speech') console.log('SR err',e.error); };
+  r.onend=function(){
+    if(S.screen==='incall' && !S.muted){
+      try{ r.start(); }catch(e){}
+    }
+  };
+  S.recog=r;
+  try{ r.start(); S.recognizing=true; }catch(e){}
+}
+
+function translateText(text, toLang, cb){
+  fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      model:'claude-sonnet-4-20250514', max_tokens:300,
+      messages:[{role:'user',content:'Translate to '+toLang+'. Return ONLY translated text, nothing else.\n\nText: '+text}]
+    })
+  }).then(function(r){return r.json();})
+  .then(function(d){ cb(d.content&&d.content[0]?d.content[0].text.trim():'…'); })
+  .catch(function(){ cb('(translation error)'); });
+}
+
+function updateSubtitles(){
+  var el=document.getElementById('subtitles');
+  if(!el) return;
+  el.innerHTML=subtitlesHTML();
+  el.scrollTop=el.scrollHeight;
+}
+
+function subtitlesHTML(){
+  if(!S.subtitles.length) return '<div style="text-align:center;color:#2a3a4a;font-size:13px;padding:20px 0">🎙 Start speaking — subtitles appear here</div>';
+  return S.subtitles.map(function(s){
+    var me=s.who==='me';
+    return '<div style="display:flex;flex-direction:column;align-items:'+(me?'flex-end':'flex-start')+';margin-bottom:10px;animation:fadeUp .2s ease">'+
+      '<div style="font-size:9px;color:#5a7a8a;margin-bottom:3px">'+(me?'You ('+S.myLang.flag+')':'Them ('+S.theirLang.flag+')')+'</div>'+
+      '<div style="background:'+(me?'#1a2a4a':'#1a2330')+';border:1px solid '+(me?'#2a4a8a':'#1e2d3d')+';border-radius:'+(me?'12px 12px 3px 12px':'12px 12px 12px 3px')+';padding:8px 12px;max-width:85%;'+(s.interim?'opacity:.6':'')+'">'+'<div style="font-size:13px;color:#e8f4f0;line-height:1.5">'+s.orig+'</div></div>'+
+      '<div style="background:'+(me?'#0a2a1e':'#0a2215')+';border:1px solid #1a5a40;border-radius:'+(me?'3px 12px 12px 12px':'12px 3px 12px 12px')+';padding:6px 12px;max-width:85%;margin-top:2px">'+
+      '<div style="font-size:12px;color:#00e5a0;line-height:1.5">'+s.xlat+'</div></div></div>';
+  }).join('');
+}
+
+// ─── RENDER ───────────────────────────────
+function R(){
+  var root=document.getElementById('root');
+  if(S.screen==='home') root.innerHTML=homeHTML();
+  else if(S.screen==='incoming') root.innerHTML=incomingHTML();
+  else if(S.screen==='calling') root.innerHTML=callingHTML();
+  else if(S.screen==='incall') root.innerHTML=incallHTML();
+  else if(S.screen==='settings') root.innerHTML=settingsHTML();
+  bindScreen();
+}
+
+// ─── HOME SCREEN ──────────────────────────
+function homeHTML(){
+  var myId=S.myId||'...';
+  var langsOpts=LANGS.map(function(l,i){
+    return '<option value="'+i+'">'+l.flag+' '+l.name+'</option>';
+  }).join('');
+  var myIdx=LANGS.findIndex(function(l){return l.code===S.myLang.code;});
+  var theirIdx=LANGS.findIndex(function(l){return l.code===S.theirLang.code;});
+
+  return '<div class="screen" style="background:linear-gradient(160deg,#0a0f14 60%,#0a1a2a)">'+
+  // Header
+  '<div style="padding:14px 18px 10px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'+
+  '<div><div style="font-size:24px;font-weight:700;color:#00e5a0;letter-spacing:-.5px">🌐 D Lingo</div>'+
+  '<div style="font-size:10px;color:#5a7a8a">AI Real-Time Call Translator</div></div>'+
+  '<button onclick="S.screen=\'settings\';R()" style="width:36px;height:36px;border-radius:10px;background:#111920;border:1px solid #1e2d3d;color:#5a7a8a;font-size:18px;display:flex;align-items:center;justify-content:center">⚙️</button></div>'+
+
+  '<div class="scroll" style="padding:0 16px 20px">'+
+
+  // My Room Code card
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:18px;margin-bottom:14px">'+
+  '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:8px">📱 YOUR ROOM CODE</div>'+
+  '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px">'+
+  '<div id="myCode" style="font-size:18px;font-weight:700;color:#00e5a0;letter-spacing:3px;background:#0a0f14;border:1px solid #1a5a40;border-radius:10px;padding:10px 14px;flex:1;text-align:center">'+
+  (S.myId?S.myId.slice(-8).toUpperCase():'Connecting...')+
+  '</div>'+
+  '<button onclick="copyCode()" style="width:44px;height:44px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:20px;display:flex;align-items:center;justify-content:center" title="Copy">📋</button>'+
+  '<button onclick="shareCode()" style="width:44px;height:44px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:20px;display:flex;align-items:center;justify-content:center" title="Share">📤</button>'+
+  '</div>'+
+  '<div style="font-size:10px;color:#5a7a8a;margin-top:8px;text-align:center">Share this code with the person you want to call</div>'+
+  '</div>'+
+
+  // Language settings
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:14px">'+
+  '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:12px">🌐 TRANSLATION SETTINGS</div>'+
+  '<div style="display:flex;align-items:center;gap:10px">'+
+  '<div style="flex:1">'+
+  '<div style="font-size:10px;color:#5a7a8a;margin-bottom:5px">I speak</div>'+
+  '<select id="myLangSel" onchange="myLangChange(this.value)" style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:10px 12px;font-size:13px;-webkit-appearance:none">'+langsOpts+'</select>'+
+  '</div>'+
+  '<div style="font-size:22px;color:#00e5a0;flex-shrink:0;margin-top:14px">⇄</div>'+
+  '<div style="flex:1">'+
+  '<div style="font-size:10px;color:#5a7a8a;margin-bottom:5px">They speak</div>'+
+  '<select id="theirLangSel" onchange="theirLangChange(this.value)" style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:10px 12px;font-size:13px;-webkit-appearance:none">'+langsOpts+'</select>'+
+  '</div></div></div>'+
+
+  // Enter code to call
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:14px">'+
+  '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:10px">📞 CALL SOMEONE</div>'+
+  '<div style="display:flex;gap:8px">'+
+  '<input id="peerInput" type="text" placeholder="Enter their Room Code" value="'+S.peerId+'" oninput="S.peerId=this.value" style="flex:1;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:12px 14px;font-size:14px;text-transform:uppercase" autocomplete="off" autocorrect="off" spellcheck="false"/>'+
+  '</div>'+
+  '<button id="callBtn" onclick="startCall()" style="width:100%;margin-top:10px;padding:15px;border-radius:14px;background:linear-gradient(135deg,#00e5a0,#00c896);color:#0a0f14;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 20px #00e5a044;animation:glow 2s infinite">'+
+  '📞 Call & Translate</button>'+
+  '</div>'+
+
+  // How it works
+  '<div style="background:#0a1520;border:1px solid #1e2d3d;border-radius:14px;padding:14px 16px;margin-bottom:10px">'+
+  '<div style="font-size:11px;font-weight:600;color:#e8f4f0;margin-bottom:10px">💡 How it works</div>'+
+  ['Share your Room Code with a friend','They enter your code and call you','Speak naturally — AI translates in real-time','Both sides hear & see translated subtitles'].map(function(s,i){
+    return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><div style="width:22px;height:22px;border-radius:50%;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">'+(i+1)+'</div>'+
+    '<div style="font-size:12px;color:#5a7a8a">'+s+'</div></div>';
+  }).join('')+
+  '<div style="font-size:10px;color:#3a5a4a;margin-top:4px">⚠️ AI translations may contain errors. Not for emergency use.</div>'+
+  '</div>'+
+
+  '</div></div>';
+}
+
+// ─── INCOMING CALL ────────────────────────
+function incomingHTML(){
+  return '<div class="screen" style="background:linear-gradient(160deg,#0a0f14 60%,#0a2a1e);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;gap:20px">'+
+  '<div style="font-size:60px;animation:ring 1s ease infinite">📲</div>'+
+  '<div style="font-size:24px;font-weight:700;color:#e8f4f0">Incoming Call</div>'+
+  '<div style="font-size:14px;color:#5a7a8a">Someone wants to call you with live translation</div>'+
+  '<div style="position:relative;margin:10px 0">'+
+  '<div style="width:90px;height:90px;border-radius:50%;background:#0d3325;border:3px solid #00e5a0;display:flex;align-items:center;justify-content:center;font-size:40px;animation:glow 1s infinite">📞</div>'+
+  '<div style="position:absolute;inset:-8px;border-radius:50%;border:2px solid #00e5a044;animation:ripple 1.5s ease infinite"></div>'+
+  '</div>'+
+  '<div style="display:flex;gap:20px;margin-top:10px">'+
+  '<button onclick="declineCall()" style="width:64px;height:64px;border-radius:50%;background:#cc2222;font-size:26px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px #cc222266">📵</button>'+
+  '<button onclick="answerCall()" style="width:64px;height:64px;border-radius:50%;background:#00e5a0;font-size:26px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px #00e5a066;animation:glow 1s infinite">📞</button>'+
+  '</div>'+
+  '<div style="font-size:11px;color:#3a5a4a">Swipe up to answer · Tap 📵 to decline</div>'+
+  '</div>';
+}
+
+// ─── CALLING SCREEN ───────────────────────
+function callingHTML(){
+  return '<div class="screen" style="background:#08111a;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;gap:16px">'+
+  '<div style="font-size:56px">🌐</div>'+
+  '<div style="font-size:22px;font-weight:700;color:#e8f4f0">D Lingo</div>'+
+  '<div style="width:36px;height:36px;border:3px solid #1e2d3d;border-top:3px solid #00e5a0;border-radius:50%;animation:spin 1s linear infinite"></div>'+
+  '<div style="font-size:15px;color:#00e5a0">'+
+  (S.status==='connecting'?'Connecting…':S.status==='ringing'?'Ringing…':'Connecting…')+'</div>'+
+  '<div style="font-size:12px;color:#5a7a8a">Setting up encrypted call</div>'+
+  '<button onclick="endCall()" style="margin-top:20px;width:60px;height:60px;border-radius:50%;background:#cc2222;font-size:24px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px #cc222255">📵</button>'+
+  '</div>';
+}
+
+// ─── IN CALL SCREEN ───────────────────────
+function incallHTML(){
+  return '<div class="screen" style="background:#08111a">'+
+
+  // Call header
+  '<div style="background:#0d1820;padding:12px 16px 10px;flex-shrink:0">'+
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+
+  '<div>'+
+  '<div style="font-size:15px;font-weight:600;color:#e8f4f0">Live Call</div>'+
+  '<div style="font-size:11px;color:#00e5a0">● Translating in real-time</div>'+
+  '</div>'+
+  '<div id="callTimer" style="font-size:22px;font-weight:700;color:#e8f4f0;font-variant-numeric:tabular-nums">'+fmtTime(S.callSecs)+'</div>'+
+  '</div>'+
+
+  // Lang pair bar
+  '<div style="background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;padding:8px 14px;display:flex;align-items:center;justify-content:space-between">'+
+  '<div style="display:flex;align-items:center;gap:8px">'+
+  '<span style="font-size:18px">'+S.myLang.flag+'</span>'+
+  '<span style="font-size:12px;color:#e8f4f0">'+S.myLang.name+'</span>'+
+  '</div>'+
+  '<div style="background:#00e5a0;color:#0a0f14;border-radius:6px;padding:2px 10px;font-size:10px;font-weight:700">LIVE AI</div>'+
+  '<div style="display:flex;align-items:center;gap:8px">'+
+  '<span style="font-size:12px;color:#e8f4f0">'+S.theirLang.name+'</span>'+
+  '<span style="font-size:18px">'+S.theirLang.flag+'</span>'+
+  '</div>'+
+  '</div>'+
+
+  // Status indicators
+  '<div style="display:flex;gap:6px;margin-top:8px">'+
+  '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:#00e5a0">'+
+  '<div style="width:6px;height:6px;border-radius:50%;background:#00e5a0;animation:pulse 1s infinite"></div>'+
+  'Voice connected</div>'+
+  (S.recognizing?'<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:#7986cb"><div style="width:6px;height:6px;border-radius:50%;background:#7986cb;animation:pulse 1.2s infinite"></div>Listening</div>':'')+
+  '</div>'+
+  '</div>'+
+
+  // Subtitles / Translation feed
+  '<div id="subtitles" class="scroll" style="flex:1;padding:10px 14px;display:flex;flex-direction:column;gap:2px">'+
+  subtitlesHTML()+
+  '</div>'+
+
+  // Controls
+  '<div style="background:#0d1820;padding:10px 14px 12px;flex-shrink:0">'+
+  '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">'+
+  ctrlBtn(S.muted?'🔇':'🎤', S.muted?'Unmuted':'Mute', S.muted, 'toggleMute()')+
+  ctrlBtn('🔊','Speaker',S.speaker,'toggleSpeaker()')+
+  ctrlBtn(S.settings.subtitles?'💬':'💬','Subtitles',S.settings.subtitles,'toggleSubs()')+
+  '</div>'+
+  '<button onclick="endCall()" style="width:100%;padding:14px;border-radius:14px;background:#cc2222;color:#fff;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 16px #cc222255">'+
+  '📵 End Call</button>'+
+  '</div>'+
+  '</div>';
+}
+
+function ctrlBtn(icon,label,on,onclick){
+  return '<button onclick="'+onclick+'" style="padding:10px 0;border-radius:12px;border:1px solid '+(on?'#1a5a40':'#1e2d3d')+';background:'+(on?'#0d3325':'#111920')+';color:'+(on?'#00e5a0':'#5a7a8a')+';display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px">'+
+  '<span style="font-size:20px">'+icon+'</span>'+label+'</button>';
+}
+
+// ─── SETTINGS SCREEN ──────────────────────
+function settingsHTML(){
+  return '<div class="screen">'+
+  '<div style="padding:14px 16px;flex-shrink:0;display:flex;align-items:center;gap:12px">'+
+  '<button onclick="S.screen=\'home\';R()" style="background:none;color:#00e5a0;font-size:20px;padding:0 4px">←</button>'+
+  '<div style="font-size:22px;font-weight:700;color:#e8f4f0">Settings</div></div>'+
+  '<div class="scroll" style="padding:0 16px 20px">'+
+
+  sRow('🤖','Auto-Translate','Translate speech in real-time',togBtn('autoTranslate',S.settings.autoTranslate))+
+  sRow('🔊','Voice Output','Speak translations aloud',togBtn('voiceOutput',S.settings.voiceOutput))+
+  sRow('💬','Show Subtitles','Display translation subtitles',togBtn('subtitles',S.settings.subtitles))+
+
+  '<div style="background:#1a1200;border:1px solid #3a2800;border-radius:12px;padding:14px 16px;margin-top:16px">'+
+  '<div style="font-size:12px;font-weight:600;color:#c8a040;margin-bottom:8px">⚠️ AI Disclaimer</div>'+
+  '<div style="font-size:11px;color:#8a6030;line-height:1.7">'+
+  'D Lingo uses AI for real-time translation. Translations may contain errors. Do NOT use for medical, legal, or emergency situations. Always verify important translations with a qualified human translator.'+
+  '</div></div>'+
+
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:12px;padding:14px 16px;margin-top:12px">'+
+  '<div style="font-size:12px;font-weight:600;color:#e8f4f0;margin-bottom:6px">🔒 Privacy</div>'+
+  '<div style="font-size:11px;color:#5a7a8a;line-height:1.7">Voice audio is processed in real-time by AI APIs for translation only. Calls are peer-to-peer encrypted. Audio is not stored by D Lingo.</div>'+
+  '</div>'+
+
+  '<div style="margin-top:20px;text-align:center">'+
+  '<div style="font-size:22px;font-weight:700;color:#00e5a0">D Lingo</div>'+
+  '<div style="font-size:11px;color:#5a7a8a;margin-top:4px">AI Real-Time Call Translator</div>'+
+  '<div style="font-size:10px;color:#2a3a4a;margin-top:4px">v2.0 · Powered by Claude AI + WebRTC</div>'+
+  '</div>'+
+  '</div></div>';
+}
+
+function sRow(icon,title,sub,right){
+  return '<div style="margin-bottom:4px;padding:12px 0;border-bottom:1px solid #0f1a23;display:flex;align-items:center;gap:12px">'+
+  '<div style="width:38px;height:38px;border-radius:10px;background:#16222d;border:1px solid #1e2d3d;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">'+icon+'</div>'+
+  '<div style="flex:1"><div style="font-size:14px;color:#e8f4f0">'+title+'</div><div style="font-size:11px;color:#5a7a8a">'+sub+'</div></div>'+
+  right+'</div>';
+}
+function togBtn(key,on){
+  return '<div onclick="S.settings.'+key+'=!S.settings.'+key+';R()" style="width:46px;height:25px;border-radius:13px;cursor:pointer;flex-shrink:0;position:relative;background:'+(on?'#00e5a0':'#253040')+';transition:background .2s">'+
+  '<div style="position:absolute;top:3.5px;left:'+(on?'24px':'3px')+';width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 4px rgba(0,0,0,.5)"></div></div>';
+}
+
+// ─── BIND ─────────────────────────────────
+function bindScreen(){
+  // Set select values after render
+  setTimeout(function(){
+    var ms=document.getElementById('myLangSel');
+    var ts=document.getElementById('theirLangSel');
+    if(ms){var mi=LANGS.findIndex(function(l){return l.code===S.myLang.code;});if(mi>=0)ms.selectedIndex=mi;}
+    if(ts){var ti=LANGS.findIndex(function(l){return l.code===S.theirLang.code;});if(ti>=0)ts.selectedIndex=ti;}
+    var pi=document.getElementById('peerInput');
+    if(pi) pi.addEventListener('input',function(){S.peerId=this.value.toUpperCase();this.value=this.value.toUpperCase();});
+  },50);
+}
+
+// ─── CONTROLS ─────────────────────────────
+function toggleMute(){
+  S.muted=!S.muted;
+  if(S.localStream) S.localStream.getAudioTracks().forEach(function(t){t.enabled=!S.muted;});
+  if(S.muted && S.recog){ try{S.recog.stop();}catch(e){} }
+  else if(!S.muted) startRecognition();
+  R();
+}
+function toggleSpeaker(){
+  S.speaker=!S.speaker;
+  var audio=document.getElementById('remoteAudio');
+  if(audio) audio.muted=!S.speaker;
+  R();
+}
+function toggleSubs(){S.settings.subtitles=!S.settings.subtitles;R();}
+function myLangChange(idx){S.myLang=LANGS[idx];if(S.screen==='incall'){if(S.recog)try{S.recog.stop();}catch(e){}setTimeout(startRecognition,300);}R();}
+function theirLangChange(idx){S.theirLang=LANGS[idx];R();}
+
+// ─── UTILS ────────────────────────────────
+function copyCode(){
+  if(!S.myId)return;
+  var code=S.myId.slice(-8).toUpperCase();
+  if(navigator.clipboard){navigator.clipboard.writeText(code).then(function(){alert('Room Code copied!\n\n'+code+'\n\nShare this with friends to call you.');});}
+  else{var ta=document.createElement('textarea');ta.value=code;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);alert('Room Code copied!\n\n'+code);}
+}
+function shareCode(){
+  if(!S.myId)return;
+  var code=S.myId.slice(-8).toUpperCase();
+  var url=window.location.href.split('?')[0]+'?code='+code;
+  var text='Join my D Lingo call! 🌐\nRoom Code: '+code+'\n\nOpen app: '+url+'\nEnter the code and call me for live AI translation!';
+  if(navigator.share){navigator.share({title:'D Lingo Call Invitation',text:text,url:url}).catch(function(){});}
+  else{copyCode();}
+}
+
+// Check URL for pre-filled code
+(function(){
+  var params=new URLSearchParams(window.location.search);
+  var code=params.get('code');
+  if(code) S.peerId=code.toUpperCase();
+})();
+
+// Init
+initPeer();
+R();
+</script>
+</body>
+</html>
