@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#0a0f14"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="D Lingo"/>
+<title>D Lingo – Live Call Translator</title>
+<script>
+// Load Agora SDK dynamically with multiple fallback CDNs
+(function(){
+  var cdns = [
+    'https://unpkg.com/agora-rtc-sdk-ng@4.20.2/AgoraRTC_N-production.min.js',
+    'https://cdn.jsdelivr.net/npm/agora-rtc-sdk-ng@4.20.2/AgoraRTC_N-production.min.js',
+    'https://download.agora.io/sdk/release/AgoraRTC_N-4.20.2.js'
+  ];
+  var idx = 0;
+  function tryLoad(){
+    if(idx >= cdns.length){ 
+      console.error('All Agora CDNs failed');
+      document.getElementById('agoraStatus').textContent = '⚠️ Network error - try on deployed URL (not local file)';
+      return; 
+    }
+    var s = document.createElement('script');
+    s.src = cdns[idx];
+    s.onload = function(){ 
+      console.log('Agora loaded from:', cdns[idx]);
+      document.getElementById('agoraStatus').textContent = '✅ Ready';
+      window._agoraLoaded = true;
+    };
+    s.onerror = function(){ idx++; tryLoad(); };
+    document.head.appendChild(s);
+  }
+  tryLoad();
+})();
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#0a0f14;font-family:Outfit,sans-serif;color:#e8f4f0;overflow:hidden}
+#root{max-width:430px;margin:0 auto;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font-family:inherit;cursor:pointer;border:none;outline:none;touch-action:manipulation}
+input,select{font-family:inherit;outline:none}
+::-webkit-scrollbar{width:0}
+.scr{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0}
+.scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes glow{0%,100%{box-shadow:0 0 8px #00e5a044}50%{box-shadow:0 0 28px #00e5a099}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes ripple{0%{transform:scale(1);opacity:.8}100%{transform:scale(2.5);opacity:0}}
+@keyframes ring{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+// ─── CONFIG ───────────────────────────────
+var APP_ID = '027348d1304840d497399c7fdca7fae3';
+var TOKEN  = null; // No token for testing mode
+
+// ─── STATE ────────────────────────────────
+var S = {
+  screen: 'home',
+  client: null,
+  localTrack: null,
+  remoteUsers: {},
+  channel: '',
+  myCode: '',
+  joinCode: '',
+  callSecs: 0,
+  callTmr: null,
+  muted: false,
+  myLang: {name:'Telugu', flag:'🇮🇳', code:'te-IN', label:'TE'},
+  theirLang: {name:'English', flag:'🇺🇸', code:'en-US', label:'EN'},
+  subtitles: [],
+  recog: null,
+  inCall: false,
+  remoteCount: 0,
+};
+
+var LANGS = [
+  {name:'Telugu',    flag:'🇮🇳', code:'te-IN', label:'TE'},
+  {name:'English',   flag:'🇺🇸', code:'en-US', label:'EN'},
+  {name:'Hindi',     flag:'🇮🇳', code:'hi-IN', label:'HI'},
+  {name:'Tamil',     flag:'🇮🇳', code:'ta-IN', label:'TA'},
+  {name:'Spanish',   flag:'🇪🇸', code:'es-ES', label:'ES'},
+  {name:'French',    flag:'🇫🇷', code:'fr-FR', label:'FR'},
+  {name:'German',    flag:'🇩🇪', code:'de-DE', label:'DE'},
+  {name:'Japanese',  flag:'🇯🇵', code:'ja-JP', label:'JA'},
+  {name:'Chinese',   flag:'🇨🇳', code:'zh-CN', label:'ZH'},
+  {name:'Arabic',    flag:'🇸🇦', code:'ar-SA', label:'AR'},
+  {name:'Korean',    flag:'🇰🇷', code:'ko-KR', label:'KO'},
+  {name:'Portuguese',flag:'🇧🇷', code:'pt-BR', label:'PT'},
+];
+
+// ─── AGORA INIT ───────────────────────────
+async function initAgora() {
+  S.client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+
+  S.client.on('user-published', async function(user, mediaType) {
+    await S.client.subscribe(user, mediaType);
+    if (mediaType === 'audio') {
+      user.audioTrack.play();
+      S.remoteCount++;
+      S.remoteUsers[user.uid] = user;
+      updateStatus('✅ Connected! Both can hear each other.');
+      if (S.screen === 'calling') {
+        S.screen = 'incall';
+        S.inCall = true;
+        startTimer();
+        startRecognition();
+        R();
+      }
+    }
+  });
+
+  S.client.on('user-unpublished', function(user, mediaType) {
+    if (mediaType === 'audio') {
+      delete S.remoteUsers[user.uid];
+      S.remoteCount--;
+    }
+  });
+
+  S.client.on('user-left', function(user) {
+    delete S.remoteUsers[user.uid];
+    S.remoteCount--;
+    if (S.remoteCount <= 0 && S.inCall) {
+      endCall();
+      alert('The other person ended the call.');
+    }
+  });
+}
+
+// ─── JOIN CHANNEL ─────────────────────────
+async function joinChannel(channelName) {
+  try {
+    S.channel = channelName;
+    var uid = Math.floor(Math.random() * 100000);
+    await S.client.join(APP_ID, channelName, TOKEN, uid);
+    S.localTrack = await AgoraRTC.createMicrophoneAudioTrack({
+      encoderConfig: 'music_standard',
+      AEC: true, ANS: true, AGC: true
+    });
+    await S.client.publish([S.localTrack]);
+    return true;
+  } catch(e) {
+    console.error('Join error:', e);
+    alert('Connection failed: ' + e.message + '\n\nMake sure mic permission is allowed.');
+    return false;
+  }
+}
+
+// ─── CALL FUNCTIONS ───────────────────────
+async function startCall() {
+  var code = (S.joinCode || '').trim().toUpperCase();
+  if (!code) { alert('Enter a Room Code!'); return; }
+  S.screen = 'calling';
+  R();
+  var ok = await joinChannel(code);
+  if (!ok) { S.screen = 'home'; R(); return; }
+  // Wait for remote user — if no one joins in 30s, still stay connected
+  setTimeout(function() {
+    if (S.screen === 'calling') {
+      // start anyway — maybe they'll join
+      S.screen = 'incall';
+      S.inCall = true;
+      startTimer();
+      startRecognition();
+      R();
+    }
+  }, 5000);
+}
+
+async function createRoom() {
+  var code = S.myCode;
+  S.screen = 'waiting';
+  R();
+  var ok = await joinChannel(code);
+  if (!ok) { S.screen = 'home'; R(); return; }
+  // Wait for caller
+  S.client.on('user-published', function() {
+    if (S.screen === 'waiting') {
+      S.screen = 'incall';
+      S.inCall = true;
+      startTimer();
+      startRecognition();
+      R();
+    }
+  });
+}
+
+async function endCall() {
+  if (S.callTmr) clearInterval(S.callTmr);
+  if (S.recog) { try { S.recog.stop(); } catch(e) {} }
+  if (S.localTrack) {
+    S.localTrack.stop();
+    S.localTrack.close();
+    S.localTrack = null;
+  }
+  try { await S.client.leave(); } catch(e) {}
+  S.inCall = false;
+  S.remoteUsers = {};
+  S.remoteCount = 0;
+  S.subtitles = [];
+  S.screen = 'home';
+  window.speechSynthesis.cancel();
+  R();
+}
+
+// ─── TIMER ────────────────────────────────
+function startTimer() {
+  S.callSecs = 0;
+  if (S.callTmr) clearInterval(S.callTmr);
+  S.callTmr = setInterval(function() {
+    S.callSecs++;
+    var el = document.getElementById('callTimer');
+    if (el) el.textContent = fmtTime(S.callSecs);
+  }, 1000);
+}
+function fmtTime(s) {
+  return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+}
+
+// ─── SPEECH RECOGNITION ───────────────────
+function startRecognition() {
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  var r = new SR();
+  r.lang = S.myLang.code;
+  r.interimResults = true;
+  r.continuous = true;
+  var interimId = null;
+
+  r.onresult = function(e) {
+    var final = '', interim = '';
+    for (var i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) final += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    if (interim) {
+      if (!interimId) {
+        interimId = 'i' + Date.now();
+        S.subtitles.push({id: interimId, who: 'me', orig: interim, xlat: '…', interim: true});
+      } else {
+        var idx = S.subtitles.findIndex(function(x) { return x.id === interimId; });
+        if (idx >= 0) S.subtitles[idx].orig = interim;
+      }
+      updateSubs();
+    }
+    if (final) {
+      if (interimId) {
+        S.subtitles = S.subtitles.filter(function(x) { return x.id !== interimId; });
+        interimId = null;
+      }
+      var id = 'f' + Date.now();
+      S.subtitles.push({id: id, who: 'me', orig: final, xlat: 'Translating…'});
+      if (S.subtitles.length > 30) S.subtitles = S.subtitles.slice(-30);
+      updateSubs();
+      translate(final, S.theirLang.name, function(xlat) {
+        var idx = S.subtitles.findIndex(function(x) { return x.id === id; });
+        if (idx >= 0) S.subtitles[idx].xlat = xlat;
+        updateSubs();
+        if (xlat && xlat !== '…') {
+          var u = new SpeechSynthesisUtterance(xlat);
+          u.lang = S.theirLang.code;
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+        }
+      });
+    }
+  };
+  r.onerror = function(e) { if (e.error !== 'no-speech') console.log('SR:', e.error); };
+  r.onend = function() {
+    if (S.inCall && !S.muted) { try { r.start(); } catch(e) {} }
+  };
+  S.recog = r;
+  try { r.start(); } catch(e) {}
+}
+
+async function translate(text, toLang, cb) {
+  try {
+    var res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514', max_tokens: 300,
+        messages: [{role: 'user', content: 'Translate to ' + toLang + '. Return ONLY translated text.\n\nText: ' + text}]
+      })
+    });
+    var d = await res.json();
+    cb(d.content && d.content[0] ? d.content[0].text.trim() : '…');
+  } catch(e) { cb('(error)'); }
+}
+
+function updateSubs() {
+  var el = document.getElementById('subsBox');
+  if (!el) return;
+  el.innerHTML = subsHTML();
+  el.scrollTop = el.scrollHeight;
+}
+
+function subsHTML() {
+  if (!S.subtitles.length) {
+    return '<div style="text-align:center;color:#2a3a4a;font-size:13px;padding:30px 0">🎙 Speak — subtitles appear here</div>';
+  }
+  return S.subtitles.map(function(s) {
+    var me = s.who === 'me';
+    return '<div style="display:flex;flex-direction:column;align-items:'+(me?'flex-end':'flex-start')+';margin-bottom:10px;animation:fadeUp .2s ease">' +
+      '<div style="font-size:9px;color:#5a7a8a;margin-bottom:3px">' + (me ? 'You '+S.myLang.flag : 'Them '+S.theirLang.flag) + '</div>' +
+      '<div style="background:'+(me?'#1a2a4a':'#1a2330')+';border:1px solid '+(me?'#2a4a8a':'#1e2d3d')+';border-radius:'+(me?'12px 12px 3px 12px':'12px 12px 12px 3px')+';padding:8px 12px;max-width:88%;'+(s.interim?'opacity:.6':'')+'">' +
+      '<div style="font-size:13px;color:#e8f4f0;line-height:1.5">' + s.orig + '</div></div>' +
+      '<div style="background:'+(me?'#0a2a1e':'#0a2215')+';border:1px solid #1a5a40;border-radius:'+(me?'3px 12px 12px 12px':'12px 3px 12px 12px')+';padding:6px 12px;max-width:88%;margin-top:2px">' +
+      '<div style="font-size:12px;color:#00e5a0;line-height:1.5">' + s.xlat + '</div></div></div>';
+  }).join('');
+}
+
+function updateStatus(msg) {
+  var el = document.getElementById('connStatus');
+  if (el) el.textContent = msg;
+}
+
+// ─── RENDER ───────────────────────────────
+function R() {
+  var root = document.getElementById('root');
+  if (S.screen === 'home')     root.innerHTML = homeHTML();
+  else if (S.screen === 'calling')  root.innerHTML = callingHTML();
+  else if (S.screen === 'waiting')  root.innerHTML = waitingHTML();
+  else if (S.screen === 'incall')   root.innerHTML = incallHTML();
+  bindScreen();
+}
+
+// ─── HOME ─────────────────────────────────
+function homeHTML() {
+  var myIdx  = LANGS.findIndex(function(l){return l.code===S.myLang.code;});
+  var theirIdx = LANGS.findIndex(function(l){return l.code===S.theirLang.code;});
+  var opts = LANGS.map(function(l,i){
+    return '<option value="'+i+'"'+(i===myIdx?' selected':'')+'>'+l.flag+' '+l.name+'</option>';
+  }).join('');
+  var opts2 = LANGS.map(function(l,i){
+    return '<option value="'+i+'"'+(i===theirIdx?' selected':'')+'>'+l.flag+' '+l.name+'</option>';
+  }).join('');
+
+  return '<div class="scr" style="background:linear-gradient(160deg,#0a0f14 60%,#0a1a2a)">'+
+
+  // Header
+  '<div style="padding:14px 18px 10px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'+
+  '<div><div style="font-size:24px;font-weight:700;color:#00e5a0">🌐 D Lingo</div>'+
+  '<div style="font-size:10px;color:#5a7a8a">AI Real-Time Call Translator</div><div id="agoraStatus" style="font-size:9px;color:#3a5a4a">Loading SDK...</div></div>'+
+  '</div>'+
+
+  '<div class="scroll" style="padding:0 16px 20px">'+
+
+  // === STEP 1: My Room Code ===
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:12px">'+
+  '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:10px">📱 STEP 1 — YOUR ROOM CODE</div>'+
+  '<div style="font-size:13px;color:#5a7a8a;margin-bottom:8px">Share this code with the person you want to call:</div>'+
+  '<div style="display:flex;align-items:center;gap:8px">'+
+  '<div style="font-size:22px;font-weight:700;color:#00e5a0;letter-spacing:3px;background:#0a0f14;border:1px solid #1a5a40;border-radius:10px;padding:10px 14px;flex:1;text-align:center">'+S.myCode+'</div>'+
+  '<button onclick="copyCode()" style="width:44px;height:44px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:20px;display:flex;align-items:center;justify-content:center">📋</button>'+
+  '<button onclick="shareCode()" style="width:44px;height:44px;border-radius:10px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:20px;display:flex;align-items:center;justify-content:center">📤</button>'+
+  '</div>'+
+  '<button onclick="createRoom()" style="width:100%;margin-top:10px;padding:12px;border-radius:12px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:center;gap:8px">'+
+  '📞 Wait for Call (Open My Room)</button>'+
+  '</div>'+
+
+  // === STEP 2: Call Someone ===
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:12px">'+
+  '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:10px">📞 STEP 2 — CALL SOMEONE</div>'+
+  '<div style="font-size:13px;color:#5a7a8a;margin-bottom:8px">Enter their Room Code to call:</div>'+
+  '<input id="joinInput" type="text" value="'+S.joinCode+'" placeholder="Enter Room Code (e.g. ABCD1234)" '+
+  'oninput="S.joinCode=this.value.toUpperCase();this.value=this.value.toUpperCase()" '+
+  'style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:12px 14px;font-size:15px;letter-spacing:2px;text-align:center;margin-bottom:10px" '+
+  'autocomplete="off" autocorrect="off" spellcheck="false"/>'+
+  '<button onclick="startCall()" style="width:100%;padding:14px;border-radius:14px;background:linear-gradient(135deg,#00e5a0,#00c896);color:#0a0f14;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 20px #00e5a044;animation:glow 2s infinite">'+
+  '📞 Call & Translate</button>'+
+  '</div>'+
+
+  // === Language Settings ===
+  '<div style="background:#111920;border:1px solid #1e2d3d;border-radius:16px;padding:16px;margin-bottom:12px">'+
+  '<div style="font-size:10px;color:#5a7a8a;letter-spacing:.1em;margin-bottom:12px">🌐 LANGUAGE SETTINGS</div>'+
+  '<div style="display:flex;align-items:center;gap:10px">'+
+  '<div style="flex:1">'+
+  '<div style="font-size:10px;color:#5a7a8a;margin-bottom:5px">I speak</div>'+
+  '<select id="myLang" onchange="S.myLang=LANGS[this.value];R()" style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:10px 12px;font-size:13px">'+opts+'</select>'+
+  '</div>'+
+  '<div style="font-size:20px;color:#00e5a0;flex-shrink:0;margin-top:14px">⇄</div>'+
+  '<div style="flex:1">'+
+  '<div style="font-size:10px;color:#5a7a8a;margin-bottom:5px">They speak</div>'+
+  '<select id="theirLang" onchange="S.theirLang=LANGS[this.value];R()" style="width:100%;background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;color:#e8f4f0;padding:10px 12px;font-size:13px">'+opts2+'</select>'+
+  '</div></div>'+
+  '</div>'+
+
+  // How it works
+  '<div style="background:#0a1520;border:1px solid #1e2d3d;border-radius:14px;padding:14px 16px">'+
+  '<div style="font-size:11px;font-weight:600;color:#e8f4f0;margin-bottom:10px">💡 How to use</div>'+
+  [
+    'Person A: Copy Room Code → Share to friend via WhatsApp',
+    'Person A: Tap "Wait for Call (Open My Room)"',
+    'Person B: Enter the code → Tap "Call & Translate"',
+    'Both connected! Speak naturally — AI translates live 🎙'
+  ].map(function(s,i){
+    return '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px">'+
+    '<div style="width:20px;height:20px;border-radius:50%;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">'+(i+1)+'</div>'+
+    '<div style="font-size:12px;color:#5a7a8a;line-height:1.6">'+s+'</div></div>';
+  }).join('')+
+  '<div style="font-size:10px;color:#3a5a4a;margin-top:4px">⚠️ AI translations may contain errors. Not for emergency use.</div>'+
+  '</div>'+
+
+  '</div></div>';
+}
+
+// ─── CALLING / WAITING ────────────────────
+function callingHTML() {
+  return '<div class="scr" style="background:#08111a;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;gap:16px">'+
+  '<div style="font-size:52px">🌐</div>'+
+  '<div style="font-size:20px;font-weight:700;color:#e8f4f0">Connecting…</div>'+
+  '<div style="width:40px;height:40px;border:3px solid #1e2d3d;border-top:3px solid #00e5a0;border-radius:50%;animation:spin 1s linear infinite"></div>'+
+  '<div id="connStatus" style="font-size:13px;color:#00e5a0;text-align:center">Joining channel…</div>'+
+  '<div style="font-size:12px;color:#5a7a8a;text-align:center">Room: <b style="color:#e8f4f0">'+S.joinCode+'</b></div>'+
+  '<button onclick="endCall()" style="margin-top:16px;width:56px;height:56px;border-radius:50%;background:#cc2222;font-size:24px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px #cc222255">📵</button>'+
+  '</div>';
+}
+
+function waitingHTML() {
+  return '<div class="scr" style="background:#08111a;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;gap:16px">'+
+  '<div style="position:relative">'+
+  '<div style="width:88px;height:88px;border-radius:50%;background:#0d3325;border:3px solid #00e5a0;display:flex;align-items:center;justify-content:center;font-size:40px;animation:glow 2s infinite">📞</div>'+
+  '<div style="position:absolute;inset:-8px;border-radius:50%;border:2px solid #00e5a044;animation:ripple 1.5s ease infinite"></div>'+
+  '</div>'+
+  '<div style="font-size:20px;font-weight:700;color:#e8f4f0">Waiting for call…</div>'+
+  '<div style="font-size:13px;color:#5a7a8a;text-align:center">Room is open. Share your code:</div>'+
+  '<div style="font-size:24px;font-weight:700;color:#00e5a0;letter-spacing:3px;background:#0a0f14;border:1px solid #1a5a40;border-radius:12px;padding:12px 24px">'+S.myCode+'</div>'+
+  '<div style="font-size:12px;color:#5a7a8a;text-align:center">As soon as they call → connected automatically!</div>'+
+  '<div style="display:flex;gap:12px;margin-top:8px">'+
+  '<button onclick="copyCode()" style="padding:10px 20px;border-radius:12px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:13px;display:flex;align-items:center;gap:6px">📋 Copy</button>'+
+  '<button onclick="shareCode()" style="padding:10px 20px;border-radius:12px;background:#0d3325;border:1px solid #1a5a40;color:#00e5a0;font-size:13px;display:flex;align-items:center;gap:6px">📤 Share</button>'+
+  '</div>'+
+  '<button onclick="endCall()" style="margin-top:10px;padding:12px 28px;border-radius:12px;background:#2a0f0f;border:1px solid #4a1a1a;color:#ff5555;font-size:14px">Cancel</button>'+
+  '</div>';
+}
+
+// ─── IN CALL ──────────────────────────────
+function incallHTML() {
+  return '<div class="scr" style="background:#08111a">'+
+
+  '<div style="background:#0d1820;padding:12px 16px 10px;flex-shrink:0">'+
+  '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'+
+  '<div>'+
+  '<div style="font-size:15px;font-weight:700;color:#e8f4f0">Live Call</div>'+
+  '<div style="font-size:11px;color:#00e5a0;display:flex;align-items:center;gap:5px">'+
+  '<div style="width:7px;height:7px;border-radius:50%;background:#00e5a0;animation:pulse 1s infinite"></div>Translating live'+
+  '</div></div>'+
+  '<div id="callTimer" style="font-size:24px;font-weight:700;color:#e8f4f0;font-variant-numeric:tabular-nums">'+fmtTime(S.callSecs)+'</div>'+
+  '</div>'+
+
+  '<div style="background:#0a0f14;border:1px solid #1e2d3d;border-radius:10px;padding:8px 14px;display:flex;align-items:center;justify-content:space-between">'+
+  '<div style="display:flex;align-items:center;gap:6px">'+
+  '<span style="font-size:18px">'+S.myLang.flag+'</span>'+
+  '<span style="font-size:12px;color:#e8f4f0">'+S.myLang.name+'</span>'+
+  '</div>'+
+  '<div style="background:#00e5a0;color:#0a0f14;border-radius:20px;padding:3px 12px;font-size:10px;font-weight:700">AI LIVE</div>'+
+  '<div style="display:flex;align-items:center;gap:6px">'+
+  '<span style="font-size:12px;color:#e8f4f0">'+S.theirLang.name+'</span>'+
+  '<span style="font-size:18px">'+S.theirLang.flag+'</span>'+
+  '</div>'+
+  '</div>'+
+  '</div>'+
+
+  '<div id="subsBox" class="scroll" style="flex:1;padding:10px 14px;display:flex;flex-direction:column;gap:2px">'+
+  subsHTML()+
+  '</div>'+
+
+  '<div style="background:#0d1820;padding:10px 14px 12px;flex-shrink:0">'+
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">'+
+  cBtn(S.muted?'🔇':'🎤', S.muted?'Unmuted':'Mute', S.muted, 'toggleMute()')+
+  cBtn('🔊','Speaker',true,'null')+
+  '</div>'+
+  '<button onclick="endCall()" style="width:100%;padding:14px;border-radius:14px;background:#cc2222;color:#fff;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:0 4px 16px #cc222255">'+
+  '📵 End Call</button>'+
+  '</div>'+
+  '</div>';
+}
+
+function cBtn(icon,label,on,fn){
+  return '<button onclick="'+fn+'" style="padding:11px 0;border-radius:12px;border:1px solid '+(on?'#1a5a40':'#1e2d3d')+';background:'+(on?'#0d3325':'#111920')+';color:'+(on?'#00e5a0':'#5a7a8a')+';display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px">'+
+  '<span style="font-size:22px">'+icon+'</span>'+label+'</button>';
+}
+
+// ─── CONTROLS ─────────────────────────────
+function toggleMute(){
+  S.muted = !S.muted;
+  if (S.localTrack) S.localTrack.setEnabled(!S.muted);
+  if (S.muted && S.recog) { try { S.recog.stop(); } catch(e){} }
+  else if (!S.muted) startRecognition();
+  R();
+}
+
+// ─── UTILS ────────────────────────────────
+function copyCode(){
+  if(navigator.clipboard){
+    navigator.clipboard.writeText(S.myCode).then(function(){
+      alert('Room Code copied!\n\n'+S.myCode+'\n\nShare via WhatsApp to call!');
+    });
+  } else {
+    alert('Your Room Code:\n\n'+S.myCode+'\n\nShare this with friends!');
+  }
+}
+function shareCode(){
+  var url = window.location.href.split('?')[0];
+  var text = '🌐 D Lingo Call Invite!\n\nRoom Code: '+S.myCode+'\n\nOpen: '+url+'\nEnter code → Call & Translate!';
+  if(navigator.share){ navigator.share({title:'D Lingo', text:text}).catch(function(){}); }
+  else { copyCode(); }
+}
+
+function bindScreen(){
+  // Select values
+  setTimeout(function(){
+    var ml = document.getElementById('myLang');
+    var tl = document.getElementById('theirLang');
+    if(ml){ var mi=LANGS.findIndex(function(l){return l.code===S.myLang.code;}); if(mi>=0)ml.selectedIndex=mi; }
+    if(tl){ var ti=LANGS.findIndex(function(l){return l.code===S.theirLang.code;}); if(ti>=0)tl.selectedIndex=ti; }
+  }, 50);
+}
+
+// ─── GENERATE ROOM CODE ───────────────────
+function genCode(){
+  var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  var code = '';
+  for(var i=0; i<8; i++) code += chars[Math.floor(Math.random()*chars.length)];
+  return code;
+}
+
+// ─── INIT ─────────────────────────────────
+S.myCode = genCode();
+// Check URL param
+var urlParams = new URLSearchParams(window.location.search);
+var preCode = urlParams.get('code');
+if(preCode) S.joinCode = preCode.toUpperCase();
+
+// Show home screen immediately
+R();
+// Wait for Agora SDK to load then init
+var agoraWait = setInterval(function(){
+  if(typeof AgoraRTC !== 'undefined'){
+    clearInterval(agoraWait);
+    initAgora().catch(function(e){ 
+      console.log('Agora init error:', e); 
+      var el=document.getElementById('agoraStatus');
+      if(el) el.textContent='⚠️ SDK error - deploy to HTTPS';
+    });
+  }
+}, 200);
+// Timeout after 15s
+setTimeout(function(){ clearInterval(agoraWait); }, 15000);
+</script>
+</body>
+</html>
