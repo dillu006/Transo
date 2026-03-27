@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>VoiceX — Real-Time Voice Translator</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --bg: #080c14;
+    --surface: #0f1622;
+    --surface2: #162033;
+    --border: #1e2d45;
+    --accent: #00c8ff;
+    --accent2: #7b61ff;
+    --green: #00e5a0;
+    --red: #ff4566;
+    --text: #e8f0ff;
+    --muted: #5a7090;
+    --card: rgba(15,22,34,0.95);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);overflow-x:hidden}
+
+  /* Animated background */
+  body::before{
+    content:'';position:fixed;inset:0;
+    background:radial-gradient(ellipse 80% 60% at 20% 10%,rgba(0,200,255,0.07) 0%,transparent 60%),
+               radial-gradient(ellipse 60% 80% at 80% 90%,rgba(123,97,255,0.07) 0%,transparent 60%);
+    pointer-events:none;z-index:0;
+  }
+
+  /* PAGE SYSTEM */
+  .page{display:none;min-height:100vh;position:relative;z-index:1}
+  .page.active{display:block}
+
+  /* ───── HEADER ───── */
+  header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:16px 20px;
+    border-bottom:1px solid var(--border);
+    background:rgba(8,12,20,0.8);
+    backdrop-filter:blur(12px);
+    position:sticky;top:0;z-index:100;
+  }
+  .logo{
+    font-family:'Syne',sans-serif;font-weight:800;font-size:1.4rem;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+    letter-spacing:-0.5px;
+  }
+  .logo span{font-size:0.65rem;font-weight:400;display:block;color:var(--muted);-webkit-text-fill-color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-family:'DM Sans',sans-serif}
+  nav{display:flex;gap:8px}
+  nav button{
+    background:none;border:1px solid var(--border);color:var(--muted);
+    padding:6px 14px;border-radius:20px;font-size:0.75rem;cursor:pointer;
+    font-family:'DM Sans',sans-serif;transition:all 0.2s;
+  }
+  nav button:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* ───── MAIN APP ───── */
+  .app-container{max-width:480px;margin:0 auto;padding:20px 16px 100px}
+
+  .badge{
+    display:inline-flex;align-items:center;gap:6px;
+    background:rgba(0,200,255,0.08);border:1px solid rgba(0,200,255,0.2);
+    color:var(--accent);font-size:0.7rem;padding:4px 12px;border-radius:20px;
+    margin:16px 0;font-weight:500;letter-spacing:0.5px;
+  }
+  .badge::before{content:'●';font-size:0.5rem;animation:blink 1.5s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+
+  /* Language panels */
+  .lang-panel{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:16px;padding:16px;margin-bottom:4px;
+    transition:border-color 0.3s;
+  }
+  .lang-panel.active-listening{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,200,255,0.1)}
+  .lang-panel.active-speaking{border-color:var(--green);box-shadow:0 0 0 3px rgba(0,229,160,0.1)}
+
+  .panel-label{font-size:0.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;font-weight:600}
+
+  .lang-select-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .flag-emoji{font-size:1.4rem}
+  select{
+    flex:1;background:var(--surface2);border:1px solid var(--border);
+    color:var(--text);padding:8px 12px;border-radius:10px;font-size:0.85rem;
+    font-family:'DM Sans',sans-serif;cursor:pointer;outline:none;
+    transition:border-color 0.2s;
+  }
+  select:focus{border-color:var(--accent)}
+
+  .speech-box{
+    background:var(--surface2);border-radius:10px;padding:12px;
+    min-height:60px;font-size:0.9rem;line-height:1.5;color:var(--text);
+    border:1px solid transparent;transition:border-color 0.3s;
+    word-break:break-word;
+  }
+  .speech-box.placeholder{color:var(--muted)}
+  .speech-box.listening{border-color:rgba(0,200,255,0.4);animation:pulse-border 1s infinite alternate}
+  @keyframes pulse-border{from{border-color:rgba(0,200,255,0.2)}to{border-color:rgba(0,200,255,0.6)}}
+
+  /* Swap row */
+  .swap-row{display:flex;align-items:center;justify-content:center;padding:8px 0;position:relative}
+  .swap-btn{
+    width:40px;height:40px;border-radius:50%;
+    background:var(--surface2);border:1px solid var(--border);
+    color:var(--accent);font-size:1.1rem;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    transition:all 0.3s;z-index:1;
+  }
+  .swap-btn:hover{background:var(--accent);color:#000;transform:rotate(180deg)}
+  .swap-line{position:absolute;left:0;right:0;height:1px;background:var(--border)}
+
+  /* MIC BUTTON */
+  .mic-area{
+    position:fixed;bottom:0;left:0;right:0;
+    padding:16px 20px 24px;
+    background:linear-gradient(transparent,var(--bg) 30%);
+    display:flex;flex-direction:column;align-items:center;gap:10px;
+    z-index:50;
+  }
+  .mic-btn{
+    width:72px;height:72px;border-radius:50%;border:none;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;font-size:1.6rem;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    box-shadow:0 4px 20px rgba(0,200,255,0.4);
+    transition:all 0.3s;position:relative;
+  }
+  .mic-btn::before{
+    content:'';position:absolute;inset:-6px;border-radius:50%;
+    border:2px solid rgba(0,200,255,0.3);
+    animation:none;
+  }
+  .mic-btn.recording{
+    background:linear-gradient(135deg,var(--red),#ff6b35);
+    box-shadow:0 4px 24px rgba(255,69,102,0.5);
+  }
+  .mic-btn.recording::before{
+    animation:ripple 1.2s linear infinite;
+    border-color:rgba(255,69,102,0.4);
+  }
+  @keyframes ripple{0%{transform:scale(1);opacity:1}100%{transform:scale(1.5);opacity:0}}
+  .mic-hint{font-size:0.72rem;color:var(--muted)}
+
+  /* HISTORY */
+  .history-section{margin-top:20px}
+  .section-title{
+    font-family:'Syne',sans-serif;font-size:0.9rem;font-weight:700;
+    color:var(--muted);text-transform:uppercase;letter-spacing:1px;
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:12px;
+  }
+  .clear-btn{font-size:0.7rem;color:var(--red);background:none;border:none;cursor:pointer;font-family:'DM Sans',sans-serif}
+  .clear-btn:hover{text-decoration:underline}
+  .history-list{display:flex;flex-direction:column;gap:10px}
+  .history-item{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:12px;padding:12px;font-size:0.82rem;
+  }
+  .history-item .hi-original{color:var(--muted);margin-bottom:4px;font-size:0.78rem}
+  .history-item .hi-translated{color:var(--text);font-weight:500}
+  .history-item .hi-meta{font-size:0.68rem;color:var(--muted);margin-top:6px;display:flex;gap:8px}
+  .history-empty{color:var(--muted);font-size:0.82rem;text-align:center;padding:20px}
+
+  /* STATUS TOAST */
+  #status-toast{
+    position:fixed;top:70px;left:50%;transform:translateX(-50%);
+    background:var(--surface2);border:1px solid var(--border);
+    color:var(--accent);padding:8px 20px;border-radius:20px;
+    font-size:0.8rem;z-index:200;opacity:0;transition:opacity 0.3s;
+    pointer-events:none;white-space:nowrap;
+  }
+  #status-toast.show{opacity:1}
+
+  /* ───── POLICY PAGES ───── */
+  .policy-page{max-width:640px;margin:0 auto;padding:30px 20px 60px}
+  .policy-page h1{
+    font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:800;
+    margin-bottom:4px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  }
+  .policy-page .eff-date{font-size:0.8rem;color:var(--muted);margin-bottom:28px}
+  .policy-page h2{
+    font-family:'Syne',sans-serif;font-size:1rem;font-weight:700;
+    color:var(--accent);margin:24px 0 8px;text-transform:uppercase;letter-spacing:0.5px;
+  }
+  .policy-page p,.policy-page li{font-size:0.88rem;line-height:1.7;color:rgba(232,240,255,0.8);margin-bottom:6px}
+  .policy-page ul{padding-left:20px;margin-bottom:8px}
+  .policy-page ul li::marker{color:var(--accent)}
+  .policy-section{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:14px;padding:16px 20px;margin-bottom:12px;
+  }
+  .policy-section h2{margin-top:0}
+  .back-btn{
+    display:inline-flex;align-items:center;gap:6px;
+    background:none;border:1px solid var(--border);color:var(--muted);
+    padding:8px 16px;border-radius:20px;font-size:0.8rem;cursor:pointer;
+    font-family:'DM Sans',sans-serif;margin-bottom:24px;transition:all 0.2s;
+  }
+  .back-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .contact-chip{
+    display:inline-flex;align-items:center;gap:6px;
+    background:rgba(0,200,255,0.08);border:1px solid rgba(0,200,255,0.2);
+    color:var(--accent);padding:6px 14px;border-radius:20px;font-size:0.82rem;margin-top:8px;
+  }
+
+  /* scrollbar */
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+  @media(max-width:380px){
+    .logo{font-size:1.15rem}
+    nav button{padding:5px 10px;font-size:0.7rem}
+  }
+</style>
+</head>
+<body>
+
+<!-- STATUS TOAST -->
+<div id="status-toast"></div>
+
+<!-- ═══════════════════ MAIN APP PAGE ═══════════════════ -->
+<div class="page active" id="page-home">
+  <header>
+    <div class="logo">VoiceX<span>Real-Time Voice Translator</span></div>
+    <nav>
+      <button onclick="showPage('page-privacy')">Privacy</button>
+      <button onclick="showPage('page-terms')">Terms</button>
+    </nav>
+  </header>
+
+  <div class="app-container">
+    <div class="badge">✦ 100% FREE · No signup · 25+ Languages</div>
+
+    <!-- SOURCE LANGUAGE PANEL -->
+    <div class="lang-panel" id="panel-src">
+      <div class="panel-label">🎤 Mee Language (Speak)</div>
+      <div class="lang-select-row">
+        <span class="flag-emoji" id="flag-src">🇮🇳</span>
+        <select id="lang-src" onchange="updateFlag('src')">
+          <!-- options injected by JS -->
+        </select>
+      </div>
+      <div class="speech-box placeholder" id="speech-box">మీరు speak చేసిన తర్వాత ఇక్కడ కనిపిస్తుంది...</div>
+    </div>
+
+    <!-- SWAP -->
+    <div class="swap-row">
+      <div class="swap-line"></div>
+      <button class="swap-btn" onclick="swapLanguages()" title="Swap Languages">⇅</button>
+    </div>
+
+    <!-- TARGET LANGUAGE PANEL -->
+    <div class="lang-panel" id="panel-tgt">
+      <div class="panel-label">🔊 Valla Language (Translation)</div>
+      <div class="lang-select-row">
+        <span class="flag-emoji" id="flag-tgt">🇨🇳</span>
+        <select id="lang-tgt" onchange="updateFlag('tgt')">
+        </select>
+      </div>
+      <div class="speech-box placeholder" id="translation-box">Translation ikkada kanavastundi...</div>
+    </div>
+
+    <!-- HISTORY -->
+    <div class="history-section">
+      <div class="section-title">
+        📋 Conversation History
+        <button class="clear-btn" onclick="clearHistory()">Clear All</button>
+      </div>
+      <div class="history-list" id="history-list">
+        <div class="history-empty">Inkaa conversation ledu. Speak cheyandi!</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MIC BUTTON FIXED -->
+  <div class="mic-area">
+    <button class="mic-btn" id="mic-btn" onclick="toggleMic()">🎤</button>
+    <span class="mic-hint" id="mic-hint">Chrome lo best · Mic permission allow cheyyandi</span>
+  </div>
+</div>
+
+<!-- ═══════════════════ PRIVACY POLICY PAGE ═══════════════════ -->
+<div class="page" id="page-privacy">
+  <header>
+    <div class="logo">VoiceX<span>Real-Time Voice Translator</span></div>
+    <nav>
+      <button onclick="showPage('page-home')">Home</button>
+      <button onclick="showPage('page-terms')">Terms</button>
+    </nav>
+  </header>
+  <div class="policy-page">
+    <button class="back-btn" onclick="showPage('page-home')">← Back to App</button>
+    <h1>Privacy Policy</h1>
+    <div class="eff-date">Effective Date: April 1, 2025 &nbsp;·&nbsp; Last Updated: March 2026</div>
+
+    <div class="policy-section">
+      <h2>Introduction</h2>
+      <p>VoiceX respects your privacy and is fully committed to protecting your personal information. This policy explains what we collect, how we use it, and your rights.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Information We Collect</h2>
+      <ul>
+        <li><strong>Microphone input</strong> — Voice audio captured only while you actively press the mic button</li>
+        <li><strong>Speech-to-text data</strong> — Text generated from your voice via your browser's built-in Web Speech API</li>
+        <li><strong>Language preferences</strong> — The languages you select are stored locally in your browser only</li>
+        <li><strong>Conversation history</strong> — Stored temporarily in your browser session only; cleared when you close the app</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>How We Use Your Data</h2>
+      <ul>
+        <li>To convert your voice to text (processed locally in your browser)</li>
+        <li>To provide real-time translation via MyMemory API</li>
+        <li>To display your conversation history during your session</li>
+        <li>We do <strong>NOT</strong> use your data for advertising, profiling, or analytics</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Data Storage</h2>
+      <ul>
+        <li>We do <strong>NOT</strong> store your voice recordings permanently — anywhere</li>
+        <li>Speech data is processed in real-time and immediately discarded</li>
+        <li>No user accounts, no login, no database — zero server-side storage</li>
+        <li>Conversation history exists only in your browser's memory during the active session</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Third-Party Services</h2>
+      <p>We use the following trusted APIs to power translation:</p>
+      <ul>
+        <li><strong>Web Speech API</strong> — Your browser's built-in speech recognition (Google Chrome). Processed by your browser/Google as per their policies.</li>
+        <li><strong>MyMemory Translation API</strong> — Free translation service by Translated.net. Text sent for translation is subject to their <a href="https://mymemory.translated.net/doc/usagelimits.php" target="_blank" style="color:var(--accent)">usage policy</a>.</li>
+      </ul>
+      <p>We do not share your data with any other third parties.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>User Consent & Permissions</h2>
+      <ul>
+        <li>By pressing the microphone button, you grant temporary microphone access</li>
+        <li>You can revoke microphone permission anytime via your browser settings</li>
+        <li>Using VoiceX means you agree to the terms of this Privacy Policy</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Data Security</h2>
+      <p>Since we store no personal data on our servers, your information is inherently safe from server-side breaches. We use HTTPS for all API communications to protect data in transit.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Children's Privacy</h2>
+      <p>VoiceX is not directed at children under 13. We do not knowingly collect data from minors.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Changes to This Policy</h2>
+      <p>We may update this Privacy Policy periodically. Changes will be reflected with a new "Last Updated" date at the top of this page. Continued use of the app constitutes acceptance of the updated policy.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Contact Us</h2>
+      <p>For any privacy-related questions or concerns, please reach out:</p>
+      <div class="contact-chip">✉️ dlingo.app@gmail.com</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ TERMS & CONDITIONS PAGE ═══════════════════ -->
+<div class="page" id="page-terms">
+  <header>
+    <div class="logo">VoiceX<span>Real-Time Voice Translator</span></div>
+    <nav>
+      <button onclick="showPage('page-home')">Home</button>
+      <button onclick="showPage('page-privacy')">Privacy</button>
+    </nav>
+  </header>
+  <div class="policy-page">
+    <button class="back-btn" onclick="showPage('page-home')">← Back to App</button>
+    <h1>Terms &amp; Conditions</h1>
+    <div class="eff-date">Effective Date: April 1, 2025 &nbsp;·&nbsp; Last Updated: March 2026</div>
+
+    <div class="policy-section">
+      <h2>Acceptance of Terms</h2>
+      <p>By accessing or using VoiceX, you confirm that you have read, understood, and agree to be bound by these Terms &amp; Conditions. If you do not agree, please stop using the app immediately.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Purpose of the App</h2>
+      <ul>
+        <li>VoiceX is designed solely for <strong>real-time voice translation</strong> and communication assistance</li>
+        <li>It is intended to help users communicate across language barriers</li>
+        <li>The app is free to use with no signup required</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>User Responsibilities</h2>
+      <ul>
+        <li>You must not use VoiceX for any illegal, harmful, or unethical activities</li>
+        <li>You are solely responsible for the content you speak and translate</li>
+        <li>Do not use the app to harass, intimidate, or harm any individual or group</li>
+        <li>Do not attempt to reverse engineer, decompile, or modify the application</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Translation Accuracy</h2>
+      <ul>
+        <li>Translations are provided on a best-effort basis via third-party APIs</li>
+        <li>We do <strong>not guarantee</strong> 100% accuracy of any translation</li>
+        <li>VoiceX should not be used for critical or legal communication without professional verification</li>
+        <li>Always verify important translations independently</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Required Permissions</h2>
+      <ul>
+        <li>The app requires <strong>microphone access</strong> to function</li>
+        <li>This permission is requested only when you tap the mic button</li>
+        <li>You can revoke this permission at any time through your browser settings</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Limitation of Liability</h2>
+      <ul>
+        <li>VoiceX is provided "as is" without any warranties, express or implied</li>
+        <li>We are not liable for any miscommunication, misunderstanding, or loss arising from the use of translations</li>
+        <li>We are not responsible for any third-party service outages (Web Speech API, MyMemory)</li>
+        <li>Our total liability to you shall not exceed the amount you paid to use the app (zero, as it's free)</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Intellectual Property</h2>
+      <p>All design, code, and branding of VoiceX are the property of the developers. You may not copy, redistribute, or create derivative works without written permission.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Updates &amp; Changes</h2>
+      <ul>
+        <li>Features, UI, or supported languages may change or improve over time</li>
+        <li>These Terms may be updated periodically</li>
+        <li>Continued use of the app after updates constitutes acceptance of the new Terms</li>
+      </ul>
+    </div>
+
+    <div class="policy-section">
+      <h2>Governing Law</h2>
+      <p>These Terms are governed by the laws of India. Any disputes shall be subject to the jurisdiction of courts in Hyderabad, Telangana.</p>
+    </div>
+
+    <div class="policy-section">
+      <h2>Contact</h2>
+      <p>For questions about these Terms, contact us:</p>
+      <div class="contact-chip">✉️ dlingo.app@gmail.com</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ───────────────── LANGUAGE DATA ─────────────────
+const LANGUAGES = [
+  {code:'te',name:'Telugu',flag:'🇮🇳',speechCode:'te-IN'},
+  {code:'hi',name:'Hindi',flag:'🇮🇳',speechCode:'hi-IN'},
+  {code:'en',name:'English',flag:'🇬🇧',speechCode:'en-US'},
+  {code:'zh',name:'Chinese',flag:'🇨🇳',speechCode:'zh-CN'},
+  {code:'ja',name:'Japanese',flag:'🇯🇵',speechCode:'ja-JP'},
+  {code:'ko',name:'Korean',flag:'🇰🇷',speechCode:'ko-KR'},
+  {code:'ar',name:'Arabic',flag:'🇸🇦',speechCode:'ar-SA'},
+  {code:'es',name:'Spanish',flag:'🇪🇸',speechCode:'es-ES'},
+  {code:'fr',name:'French',flag:'🇫🇷',speechCode:'fr-FR'},
+  {code:'de',name:'German',flag:'🇩🇪',speechCode:'de-DE'},
+  {code:'it',name:'Italian',flag:'🇮🇹',speechCode:'it-IT'},
+  {code:'pt',name:'Portuguese',flag:'🇧🇷',speechCode:'pt-BR'},
+  {code:'ru',name:'Russian',flag:'🇷🇺',speechCode:'ru-RU'},
+  {code:'nl',name:'Dutch',flag:'🇳🇱',speechCode:'nl-NL'},
+  {code:'tr',name:'Turkish',flag:'🇹🇷',speechCode:'tr-TR'},
+  {code:'th',name:'Thai',flag:'🇹🇭',speechCode:'th-TH'},
+  {code:'vi',name:'Vietnamese',flag:'🇻🇳',speechCode:'vi-VN'},
+  {code:'bn',name:'Bengali',flag:'🇧🇩',speechCode:'bn-BD'},
+  {code:'ta',name:'Tamil',flag:'🇮🇳',speechCode:'ta-IN'},
+  {code:'kn',name:'Kannada',flag:'🇮🇳',speechCode:'kn-IN'},
+  {code:'ml',name:'Malayalam',flag:'🇮🇳',speechCode:'ml-IN'},
+  {code:'mr',name:'Marathi',flag:'🇮🇳',speechCode:'mr-IN'},
+  {code:'gu',name:'Gujarati',flag:'🇮🇳',speechCode:'gu-IN'},
+  {code:'pa',name:'Punjabi',flag:'🇮🇳',speechCode:'pa-IN'},
+  {code:'ur',name:'Urdu',flag:'🇵🇰',speechCode:'ur-PK'},
+  {code:'id',name:'Indonesian',flag:'🇮🇩',speechCode:'id-ID'},
+  {code:'ms',name:'Malay',flag:'🇲🇾',speechCode:'ms-MY'},
+  {code:'sv',name:'Swedish',flag:'🇸🇪',speechCode:'sv-SE'},
+  {code:'pl',name:'Polish',flag:'🇵🇱',speechCode:'pl-PL'},
+  {code:'uk',name:'Ukrainian',flag:'🇺🇦',speechCode:'uk-UA'},
+];
+
+// ───────────────── INIT ─────────────────
+let recognition = null;
+let isRecording = false;
+let history = [];
+
+function buildSelects(){
+  const srcSel = document.getElementById('lang-src');
+  const tgtSel = document.getElementById('lang-tgt');
+  LANGUAGES.forEach((l,i)=>{
+    const opt1 = new Option(`${l.flag} ${l.name}`,i);
+    const opt2 = new Option(`${l.flag} ${l.name}`,i);
+    if(i===2) opt1.selected=true; // English default src → wait no
+    srcSel.add(opt1);
+    tgtSel.add(opt2);
+  });
+  // Defaults: src=Telugu(0), tgt=English(2)
+  srcSel.value = 0; // Telugu
+  tgtSel.value = 2; // English
+  updateFlag('src');
+  updateFlag('tgt');
+}
+
+function getLang(side){
+  const sel = document.getElementById('lang-'+side);
+  return LANGUAGES[parseInt(sel.value)];
+}
+
+function updateFlag(side){
+  const lang = getLang(side);
+  document.getElementById('flag-'+side).textContent = lang.flag;
+}
+
+// ───────────────── PAGE ROUTING ─────────────────
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  window.scrollTo(0,0);
+}
+
+// ───────────────── SWAP ─────────────────
+function swapLanguages(){
+  const srcSel = document.getElementById('lang-src');
+  const tgtSel = document.getElementById('lang-tgt');
+  const tmp = srcSel.value;
+  srcSel.value = tgtSel.value;
+  tgtSel.value = tmp;
+  updateFlag('src');
+  updateFlag('tgt');
+
+  // Also swap text boxes
+  const speechBox = document.getElementById('speech-box');
+  const translBox = document.getElementById('translation-box');
+  const tmpTxt = speechBox.textContent;
+  const tmpClass = speechBox.classList.contains('placeholder');
+  const transClass = translBox.classList.contains('placeholder');
+  speechBox.textContent = translBox.textContent;
+  translBox.textContent = tmpTxt;
+  if(transClass) speechBox.classList.add('placeholder'); else speechBox.classList.remove('placeholder');
+  if(tmpClass) translBox.classList.add('placeholder'); else translBox.classList.remove('placeholder');
+
+  showToast('Languages swapped ⇅');
+}
+
+// ───────────────── TRANSLATION ─────────────────
+async function translate(text, fromCode, toCode){
+  try{
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${fromCode}|${toCode}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data.responseStatus===200){
+      return data.responseData.translatedText;
+    }
+    return '⚠️ Translation failed. Try again.';
+  }catch(e){
+    return '⚠️ Network error. Check connection.';
+  }
+}
+
+// ───────────────── SPEECH RECOGNITION ─────────────────
+function toggleMic(){
+  if(isRecording){
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+
+function startRecording(){
+  if(!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)){
+    showToast('⚠️ Chrome browser use cheyyandi for voice!');
+    return;
+  }
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SpeechRecognition();
+  const srcLang = getLang('src');
+  recognition.lang = srcLang.speechCode;
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  const speechBox = document.getElementById('speech-box');
+  const translBox = document.getElementById('translation-box');
+  const micBtn = document.getElementById('mic-btn');
+  const micHint = document.getElementById('mic-hint');
+  const panelSrc = document.getElementById('panel-src');
+
+  recognition.onstart = ()=>{
+    isRecording = true;
+    micBtn.classList.add('recording');
+    micBtn.textContent = '⏹';
+    micHint.textContent = 'Recording... Speak cheyandi';
+    speechBox.classList.remove('placeholder');
+    speechBox.classList.add('listening');
+    panelSrc.classList.add('active-listening');
+    speechBox.textContent = '';
+    translBox.textContent = '';
+    translBox.classList.add('placeholder');
+  };
+
+  recognition.onresult = async(e)=>{
+    let interim='', final='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal) final+=e.results[i][0].transcript;
+      else interim+=e.results[i][0].transcript;
+    }
+    speechBox.textContent = final || interim;
+    if(final){
+      translBox.textContent = '⟳ Translating...';
+      translBox.classList.remove('placeholder');
+      const tgtLang = getLang('tgt');
+      const translated = await translate(final, srcLang.code, tgtLang.code);
+      translBox.textContent = translated;
+      // Speak translated text
+      speakText(translated, tgtLang.speechCode);
+      // Add to history
+      addToHistory(final, translated, srcLang, tgtLang);
+    }
+  };
+
+  recognition.onerror = (e)=>{
+    const msgs = {
+      'not-allowed':'Mic permission denied. Browser settings lo allow cheyyandi.',
+      'no-speech':'Speech detect kaaledhu. Meeru speak chesaara?',
+      'network':'Network error. Internet check cheyyandi.',
+      'audio-capture':'Mic not found. Mic connect chesaara?',
+    };
+    showToast('⚠️ '+(msgs[e.error]||'Error: '+e.error));
+    stopRecording();
+  };
+
+  recognition.onend = ()=>{
+    stopRecording();
+  };
+
+  recognition.start();
+}
+
+function stopRecording(){
+  isRecording = false;
+  if(recognition){
+    try{recognition.stop();}catch(e){}
+    recognition = null;
+  }
+  const micBtn = document.getElementById('mic-btn');
+  const micHint = document.getElementById('mic-hint');
+  const speechBox = document.getElementById('speech-box');
+  const panelSrc = document.getElementById('panel-src');
+  micBtn.classList.remove('recording');
+  micBtn.textContent = '🎤';
+  micHint.textContent = 'Chrome lo best · Mic permission allow cheyyandi';
+  speechBox.classList.remove('listening');
+  panelSrc.classList.remove('active-listening');
+  if(!speechBox.textContent.trim()){
+    speechBox.textContent = 'మీరు speak చేసిన తర్వాత ఇక్కడ కనిపిస్తుంది...';
+    speechBox.classList.add('placeholder');
+  }
+}
+
+// ───────────────── TTS ─────────────────
+function speakText(text, langCode){
+  if(!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = langCode;
+  utt.rate = 0.95;
+  // small delay for mobile autoplay policy
+  setTimeout(()=>window.speechSynthesis.speak(utt), 200);
+}
+
+// ───────────────── HISTORY ─────────────────
+function addToHistory(original, translated, srcLang, tgtLang){
+  const now = new Date();
+  const time = now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  history.unshift({original, translated, srcLang:srcLang.name, tgtLang:tgtLang.name, time});
+  renderHistory();
+}
+
+function renderHistory(){
+  const list = document.getElementById('history-list');
+  if(history.length===0){
+    list.innerHTML='<div class="history-empty">Inkaa conversation ledu. Speak cheyandi!</div>';
+    return;
+  }
+  list.innerHTML = history.map(h=>`
+    <div class="history-item">
+      <div class="hi-original">🎤 ${escHtml(h.original)}</div>
+      <div class="hi-translated">🔊 ${escHtml(h.translated)}</div>
+      <div class="hi-meta">
+        <span>${h.srcLang} → ${h.tgtLang}</span>
+        <span>🕐 ${h.time}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function clearHistory(){
+  history = [];
+  renderHistory();
+  showToast('History cleared');
+}
+
+function escHtml(t){
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ───────────────── TOAST ─────────────────
+let toastTimer;
+function showToast(msg){
+  const t = document.getElementById('status-toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.classList.remove('show'), 3000);
+}
+
+// ───────────────── START ─────────────────
+buildSelects();
+</script>
+</body>
+</html>
